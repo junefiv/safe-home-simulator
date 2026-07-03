@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# daily police geocode cache
+/.cache/
+
 # production
 /build
 
