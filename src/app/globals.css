@@ -130,3 +130,123 @@ html {
 #startScreen {
   z-index: 1100;
 }
+
+.destination-indicator {
+  position: absolute;
+  z-index: 600;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.destination-indicator-arrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  border: 3px solid #fff;
+  box-shadow:
+    0 0 0 4px rgba(34, 197, 94, 0.35),
+    0 0 24px rgba(34, 197, 94, 0.8);
+  animation: dest-pulse 1.2s ease-in-out infinite;
+}
+
+.destination-indicator-chevron {
+  position: absolute;
+  top: -18px;
+  font-size: 28px;
+  color: #fef08a;
+  text-shadow: 0 0 8px rgba(250, 204, 21, 0.9);
+  line-height: 1;
+}
+
+.destination-indicator-icon {
+  font-size: 32px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+}
+
+.destination-indicator-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 2px solid #22c55e;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.destination-indicator-distance {
+  font-size: 12px;
+  font-weight: 700;
+  color: #86efac;
+}
+
+.home-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #22c55e 0%, #15803d 100%);
+  border: 3px solid #fff;
+  box-shadow:
+    0 0 0 6px rgba(34, 197, 94, 0.35),
+    0 0 20px rgba(34, 197, 94, 0.7);
+  animation: home-marker-bounce 1.5s ease-in-out infinite;
+}
+
+.home-marker-emoji {
+  font-size: 28px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5));
+}
+
+.home-marker-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  margin-top: 1px;
+}
+
+@keyframes home-marker-bounce {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+@keyframes dest-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow:
+      0 0 0 4px rgba(34, 197, 94, 0.35),
+      0 0 24px rgba(34, 197, 94, 0.8);
+  }
+  50% {
+    opacity: 0.92;
+    box-shadow:
+      0 0 0 8px rgba(34, 197, 94, 0.2),
+      0 0 32px rgba(34, 197, 94, 1);
+  }
+}

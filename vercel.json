@@ -6,6 +6,12 @@
     "src/app/api/roads/route.ts": {
       "maxDuration": 30
     },
+    "src/app/api/buildings/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/map-tiles/[z]/[x]/[y]/route.ts": {
+      "maxDuration": 15
+    },
     "src/app/api/geocode/route.ts": {
       "maxDuration": 15
     }

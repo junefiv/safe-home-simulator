@@ -34,6 +34,15 @@ export function createEmojiIcon(emoji: string, size = 30): L.DivIcon {
   });
 }
 
+export function createHomeIcon(): L.DivIcon {
+  return L.divIcon({
+    className: "custom-div-icon",
+    html: `<div class="home-marker"><span class="home-marker-emoji">🏠</span><span class="home-marker-label">집</span></div>`,
+    iconSize: [64, 64],
+    iconAnchor: [32, 32],
+  });
+}
+
 export type BellState = "IDLE" | "COUNTDOWN" | "COOLDOWN";
 export type ZombieState = "CHASE" | "FLEE";
 
@@ -54,7 +63,6 @@ export class Player {
     lat: number,
     lng: number,
     private map: L.Map,
-    private isValid: (lat: number, lng: number) => boolean,
     private callbacks: PlayerCallbacks,
   ) {
     this.lat = lat;
@@ -74,6 +82,7 @@ export class Player {
     keys: InputState,
     joystick: JoystickVector,
     playing: boolean,
+    isValid: (lat: number, lng: number) => boolean,
   ): void {
     if (!playing) return;
 
@@ -107,16 +116,14 @@ export class Player {
       { lat: this.lat, lng: this.lng },
       nextLat,
       nextLng,
-      this.isValid,
+      isValid,
     );
     this.lat = moved.lat;
     this.lng = moved.lng;
 
     this.marker.setLatLng([this.lat, this.lng]);
     this.map.panTo([this.lat, this.lng], {
-      animate: true,
-      duration: 0.1,
-      easeLinearity: 1,
+      animate: false,
       noMoveStart: true,
     });
 

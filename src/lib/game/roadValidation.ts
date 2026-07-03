@@ -1,3 +1,5 @@
+import type { BlockPolygon } from "./blockPolygon";
+import { wrapPolygons } from "./blockPolygon";
 import { ROAD_SEGMENT_TOLERANCE_M } from "./constants";
 import type { LatLng, RoadsData, WalkLine } from "./types";
 
@@ -44,6 +46,51 @@ export function isWalkableHighway(highway: string | undefined): boolean {
   return Boolean(highway);
 }
 
+/** VWorld 노란 대로 — 건물 폴리곤과 겹쳐도 통행 허용 */
+const MAJOR_HIGHWAYS = new Set([
+  "motorway",
+  "motorway_link",
+  "trunk",
+  "trunk_link",
+  "primary",
+  "primary_link",
+  "secondary",
+  "secondary_link",
+]);
+
+export function isMajorHighway(highway?: string): boolean {
+  return Boolean(highway && MAJOR_HIGHWAYS.has(highway));
+}
+
+interface RoadMatch {
+  onRoad: boolean;
+  major: boolean;
+}
+
+function matchWalkRoad(
+  pt: LatLng,
+  lat: number,
+  lng: number,
+  walkLines: WalkLine[],
+  walkPolygons: LatLng[][],
+): RoadMatch {
+  for (const poly of walkPolygons) {
+    if (isInsidePolygon(pt, poly)) return { onRoad: true, major: true };
+  }
+
+  for (const line of walkLines) {
+    if (lat < line.minLat || lat > line.maxLat || lng < line.minLng || lng > line.maxLng) {
+      continue;
+    }
+    if (distanceToSegment(pt, line.p1, line.p2) <= line.maxDistM) {
+      const major = isMajorHighway(line.highway) || line.maxDistM >= 28;
+      return { onRoad: true, major };
+    }
+  }
+
+  return { onRoad: false, major: false };
+}
+
 /** OSM 태그 기준 도로 폭(반경) — 지도에서 보이는 도로 폭에 맞게 넉넉히 */
 export function estimateRoadHalfWidthM(tags?: Record<string, string>): number {
   const widthM = Number(tags?.width);
@@ -57,11 +104,12 @@ export function estimateRoadHalfWidthM(tags?: Record<string, string>): number {
   }
 
   const hw = tags?.highway ?? "";
-  if (hw === "motorway" || hw === "motorway_link") return 28;
-  if (hw === "trunk" || hw === "trunk_link") return 26;
-  if (hw === "primary" || hw === "primary_link") return 24;
-  if (hw === "secondary" || hw === "secondary_link") return 26;
-  if (hw === "tertiary" || hw === "tertiary_link") return 20;
+  // VWorld 노란 대로는 지도상 넓게 그려짐 — 허용 반경을 넉넉히
+  if (hw === "motorway" || hw === "motorway_link") return 40;
+  if (hw === "trunk" || hw === "trunk_link") return 38;
+  if (hw === "primary" || hw === "primary_link") return 36;
+  if (hw === "secondary" || hw === "secondary_link") return 32;
+  if (hw === "tertiary" || hw === "tertiary_link") return 24;
   if (
     hw === "footway" ||
     hw === "path" ||
@@ -98,28 +146,26 @@ export function estimateRoadHalfWidthM(tags?: Record<string, string>): number {
   return ROAD_SEGMENT_TOLERANCE_M;
 }
 
+function isInsideBlockPolygon(pt: LatLng, block: BlockPolygon): boolean {
+  if (
+    pt.lat < block.minLat ||
+    pt.lat > block.maxLat ||
+    pt.lng < block.minLng ||
+    pt.lng > block.maxLng
+  ) {
+    return false;
+  }
+  return isInsidePolygon(pt, block.points);
+}
+
 function latLngPadForMeters(lat: number, meters: number): number {
   return meters / 111111;
 }
 
-function bboxToPolygon(
-  minLat: number,
-  maxLat: number,
-  minLng: number,
-  maxLng: number,
-): LatLng[] {
-  return [
-    { lat: minLat, lng: minLng },
-    { lat: minLat, lng: maxLng },
-    { lat: maxLat, lng: maxLng },
-    { lat: maxLat, lng: minLng },
-  ];
-}
-
 export function createPositionValidator(roads: RoadsData) {
-  const { walkLines, walkPolygons } = roads;
+  const { walkLines, walkPolygons, blockPolygons = [] } = roads;
   return (lat: number, lng: number): boolean =>
-    isValidPosition(lat, lng, walkLines, walkPolygons);
+    isValidPosition(lat, lng, walkLines, walkPolygons, blockPolygons);
 }
 
 export function isValidPosition(
@@ -127,25 +173,22 @@ export function isValidPosition(
   lng: number,
   walkLines: WalkLine[],
   walkPolygons: LatLng[][],
+  blockPolygons: BlockPolygon[] = [],
 ): boolean {
   if (walkLines.length === 0 && walkPolygons.length === 0) return false;
 
   const pt: LatLng = { lat, lng };
+  const road = matchWalkRoad(pt, lat, lng, walkLines, walkPolygons);
 
-  for (const poly of walkPolygons) {
-    if (isInsidePolygon(pt, poly)) return true;
+  // 대로(면목로 등): 건물 데이터가 도로와 겹쳐도 통행
+  if (road.onRoad && road.major) return true;
+
+  // 골목·보조도로·도로 밖: 건물 내부 차단
+  for (const block of blockPolygons) {
+    if (isInsideBlockPolygon(pt, block)) return false;
   }
 
-  for (const line of walkLines) {
-    if (lat < line.minLat || lat > line.maxLat || lng < line.minLng || lng > line.maxLng) {
-      continue;
-    }
-    if (distanceToSegment(pt, line.p1, line.p2) <= line.maxDistM) {
-      return true;
-    }
-  }
-
-  return false;
+  return road.onRoad;
 }
 
 export function getNearestValidPoint(
@@ -200,33 +243,8 @@ export function slideMove(
   return current;
 }
 
-/** 각 highway way를 도로 폭만큼 넓힌 통로 폴리곤으로 변환 */
-function buildWayBufferPolygons(elements: OverpassElement[]): LatLng[][] {
-  const polygons: LatLng[][] = [];
-
-  for (const el of elements) {
-    if (!el.geometry || el.geometry.length < 2) continue;
-    if (!isWalkableHighway(el.tags?.highway)) continue;
-
-    const halfW = estimateRoadHalfWidthM(el.tags);
-    const pad = latLngPadForMeters(el.geometry[0].lat, halfW);
-    const lats = el.geometry.map((p) => p.lat);
-    const lngs = el.geometry.map((p) => p.lon);
-
-    polygons.push(
-      bboxToPolygon(
-        Math.min(...lats) - pad,
-        Math.max(...lats) + pad,
-        Math.min(...lngs) - pad,
-        Math.max(...lngs) + pad,
-      ),
-    );
-  }
-
-  return polygons;
-}
-
 interface OverpassElement {
+  type?: string;
   geometry?: { lat: number; lon: number }[];
   tags?: Record<string, string>;
 }
@@ -240,6 +258,55 @@ function isStationElement(el: OverpassElement): boolean {
   );
 }
 
+/** 역사·문화재 건물은 통과 허용 */
+function isHistoricBuilding(tags?: Record<string, string>): boolean {
+  if (!tags) return false;
+  if (tags.historic) return true;
+  if (tags.heritage) return true;
+  if (tags.building === "historic") return true;
+  return false;
+}
+
+function isBlockingBuilding(el: OverpassElement): boolean {
+  if (!el.geometry || el.geometry.length < 3) return false;
+  if (isStationElement(el)) return false;
+
+  const tags = el.tags;
+  if (!tags) return false;
+  if (tags.building === "no") return false;
+  if (isHistoricBuilding(tags)) return false;
+
+  if (tags.building && tags.building !== "no") return true;
+  if (el.type === "relation" && tags.type === "building") return true;
+
+  return false;
+}
+
+function geometryToPolygon(geometry: { lat: number; lon: number }[]): LatLng[] {
+  return geometry.map((pt) => ({ lat: pt.lat, lng: pt.lon }));
+}
+
+export function mergeBlockPolygons(
+  existing: BlockPolygon[],
+  incoming: LatLng[][],
+): BlockPolygon[] {
+  if (incoming.length === 0) return existing;
+  return [...existing, ...wrapPolygons(incoming)];
+}
+
+export function parseOverpassBuildings(elements: OverpassElement[]): LatLng[][] {
+  const blockPolygons: LatLng[][] = [];
+
+  for (const el of elements) {
+    if (!el.geometry) continue;
+    if (isBlockingBuilding(el)) {
+      blockPolygons.push(geometryToPolygon(el.geometry));
+    }
+  }
+
+  return blockPolygons;
+}
+
 export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
   const walkLines: WalkLine[] = [];
   const walkPolygons: LatLng[][] = [];
@@ -248,9 +315,7 @@ export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
     if (!el.geometry) continue;
 
     if (isStationElement(el) && el.geometry.length > 2) {
-      walkPolygons.push(
-        el.geometry.map((pt) => ({ lat: pt.lat, lng: pt.lon })),
-      );
+      walkPolygons.push(geometryToPolygon(el.geometry));
       continue;
     }
 
@@ -271,11 +336,10 @@ export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
         minLng: Math.min(p1.lon, p2.lon) - segPad,
         maxLng: Math.max(p1.lon, p2.lon) + segPad,
         maxDistM,
+        highway,
       });
     }
   }
 
-  walkPolygons.push(...buildWayBufferPolygons(elements));
-
-  return { walkLines, walkPolygons };
+  return { walkLines, walkPolygons, blockPolygons: [] };
 }

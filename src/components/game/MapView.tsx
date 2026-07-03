@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { MapContainer, TileLayer, useMap } from "react-leaflet";
 import type L from "leaflet";
+import { GAME_MAP_ZOOM } from "@/lib/game/constants";
 
 interface MapViewProps {
   center: [number, number];
@@ -23,14 +24,21 @@ export function MapView({ center, zoom = 15, onMapReady }: MapViewProps) {
     <MapContainer
       center={center}
       zoom={zoom}
+      maxZoom={GAME_MAP_ZOOM}
       zoomControl={false}
+      dragging={false}
+      scrollWheelZoom={false}
+      doubleClickZoom={false}
+      touchZoom={false}
+      boxZoom={false}
+      keyboard={false}
       className="game-map"
       style={{ width: "100vw", height: "100vh" }}
     >
       <TileLayer
-        attribution="&copy; OpenStreetMap contributors"
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        maxZoom={19}
+        attribution='&copy; <a href="https://www.vworld.kr/">VWorld</a> / 국토교통부 &copy; OpenStreetMap'
+        url="/api/map-tiles/{z}/{x}/{y}.png"
+        maxZoom={GAME_MAP_ZOOM}
       />
       <MapReadyBridge onMapReady={onMapReady} />
     </MapContainer>

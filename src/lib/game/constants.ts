@@ -52,6 +52,14 @@ export const WALKABLE_HIGHWAY_TYPES = new Set([
   "escalator",
 ]);
 export const ROADS_BOUNDS_PADDING = 0.1;
+/** 게임 중 고정 지도 줌 (OSM 타일 maxZoom 19) */
+export const GAME_MAP_ZOOM = 19;
+/** 건물 1회 요청 시 화면 셀 대비 bbox 확장 (1.0 = 3×3 영역) */
+export const BUILDING_LOOKAHEAD_RATIO = 1.0;
+/** 건물 타일 재검사 간격(ms) */
+export const BUILDING_TILE_CHECK_MS = 500;
+/** 동시 건물 로드 수 */
+export const BUILDING_MAX_CONCURRENT = 2;
 
 export const LIGHT_RADIUS_M = 20;
 export const POLICE_RADIUS_M = 40;

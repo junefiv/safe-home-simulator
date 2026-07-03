@@ -10,6 +10,7 @@ import type { GameFacility, Player, Zombie } from "./entities";
 import { Zombie as ZombieClass } from "./entities";
 import { haversineDistance } from "./geo";
 import { isValidPosition } from "./roadValidation";
+import type { BlockPolygon } from "./blockPolygon";
 import type { InputState, JoystickVector, LatLng, WalkLine } from "./types";
 
 export interface SpawnZombiesInput {
@@ -87,6 +88,7 @@ export interface UpdateGameLoopInput {
   facilities: GameFacility[];
   walkLines: WalkLine[];
   walkPolygons: LatLng[][];
+  blockPolygons: BlockPolygon[];
   endLatLng: LatLng;
   map: L.Map;
   globalSirenActive: boolean;
@@ -113,6 +115,7 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
     facilities,
     walkLines,
     walkPolygons,
+    blockPolygons,
     endLatLng,
     map,
   } = input;
@@ -139,9 +142,9 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
   }
 
   const isValid = (lat: number, lng: number) =>
-    isValidPosition(lat, lng, walkLines, walkPolygons);
+    isValidPosition(lat, lng, walkLines, walkPolygons, blockPolygons);
 
-  player.update(dt, keys, joystick, playing);
+  player.update(dt, keys, joystick, playing, isValid);
   facilities.forEach((f) => f.update(dt));
 
   const spawnResult = spawnZombies({
