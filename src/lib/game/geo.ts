@@ -1,4 +1,4 @@
-import type { LatLng } from "./types";
+import type { Bbox, LatLng } from "./types";
 
 const EARTH_RADIUS_M = 6371000;
 const METERS_PER_DEGREE_LAT = 111111;
@@ -33,4 +33,15 @@ export function offsetByMeters(
 ): LatLng {
   const { dLat, dLng } = metersToLatLngDelta(metersNorth, metersEast, origin.lat);
   return { lat: origin.lat + dLat, lng: origin.lng + dLng };
+}
+
+export function bboxAroundPoint(lat: number, lng: number, radiusM: number): Bbox {
+  const latPad = radiusM / METERS_PER_DEGREE_LAT;
+  const lngPad = radiusM / (METERS_PER_DEGREE_LAT * Math.cos((lat * Math.PI) / 180));
+  return {
+    south: lat - latPad,
+    west: lng - lngPad,
+    north: lat + latPad,
+    east: lng + lngPad,
+  };
 }

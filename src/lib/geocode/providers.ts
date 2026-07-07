@@ -6,6 +6,7 @@ import {
   pickPlaceName,
   type NominatimAddressParts,
 } from "@/lib/geocode/format-korean-address";
+import { searchGeocodeWithVworld } from "@/lib/vworld/search";
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org/search";
 const KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json";
@@ -125,6 +126,9 @@ async function searchNominatim(query: string, limit: number): Promise<GeocodeRes
 }
 
 export async function searchGeocode(query: string, limit: number): Promise<GeocodeResult[]> {
+  const vworldResults = await searchGeocodeWithVworld(query, limit);
+  if (vworldResults.length > 0) return vworldResults;
+
   const kakaoResults = await searchKakao(query, limit);
   if (kakaoResults.length > 0) return kakaoResults;
 

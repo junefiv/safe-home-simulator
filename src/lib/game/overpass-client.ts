@@ -1,4 +1,5 @@
 const OVERPASS_SERVERS = [
+  "https://overpass.openstreetmap.kr/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
 ] as const;
@@ -13,6 +14,7 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
+/** 도로·역만 조회 (건물은 별도 API) */
 export function buildRoadsOverpassQuery(bbox: string): string {
   return `[out:json][timeout:25];
 (
@@ -24,7 +26,20 @@ export function buildRoadsOverpassQuery(bbox: string): string {
 out geom;`;
 }
 
-export async function fetchOverpassJson(query: string): Promise<{ elements?: unknown[] }> {
+/** 단일 way + multipolygon relation 건물 */
+export function buildBuildingsOverpassQuery(bbox: string): string {
+  return `[out:json][timeout:40];
+(
+  way["building"](${bbox});
+  relation["building"](${bbox});
+);
+out geom;`;
+}
+
+export async function fetchOverpassJson(
+  query: string,
+  timeoutMs = 28_000,
+): Promise<{ elements?: unknown[] }> {
   let lastError = "Overpass API를 사용할 수 없습니다";
 
   for (const server of OVERPASS_SERVERS) {
@@ -38,7 +53,7 @@ export async function fetchOverpassJson(query: string): Promise<{ elements?: unk
           },
           body: `data=${encodeURIComponent(query)}`,
           cache: "no-store",
-          signal: AbortSignal.timeout(28_000),
+          signal: AbortSignal.timeout(timeoutMs),
         });
 
         if (isRetryableStatus(res.status)) {

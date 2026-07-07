@@ -2,21 +2,41 @@
 
 import L from "leaflet";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchFacilities, fetchRoads } from "@/lib/api-client";
+import { fetchBuildings, fetchFacilities, fetchRoads } from "@/lib/api-client";
 import {
+  BUILDING_MAX_CONCURRENT,
+  BUILDING_TILE_CHECK_MS,
   FACILITIES_BBOX_PADDING,
+  GAME_MAP_ZOOM,
   PLAYER_MAX_HP,
   ROADS_BOUNDS_PADDING,
 } from "@/lib/game/constants";
+import { wrapPolygons, type BlockPolygon } from "@/lib/game/blockPolygon";
 import {
   GameFacility,
   Player,
   Zombie,
   createEmojiIcon,
+  createHomeIcon,
   triggerGlobalSirenState,
 } from "@/lib/game/entities";
 import { updateGameLoop } from "@/lib/game/gameLoop";
-import { createPositionValidator, getNearestValidPoint } from "@/lib/game/roadValidation";
+import {
+  collectSurroundingPolygons,
+  createViewportGrid,
+  getPlayerGridCell,
+  getSurroundBbox,
+  isSameCell,
+  pruneTileStore,
+  sleep,
+  type GridCell,
+  type ViewportGrid,
+} from "@/lib/game/viewportTiles";
+import { cellStorageKey } from "@/lib/game/blockPolygon";
+import {
+  createPositionValidator,
+  getNearestValidPoint,
+} from "@/lib/game/roadValidation";
 import {
   INITIAL_INPUT_STATE,
   type GameState,
@@ -26,6 +46,7 @@ import {
   type LatLng,
   type RoadsData,
 } from "@/lib/game/types";
+import { DestinationIndicator } from "./DestinationIndicator";
 import { EndScreens } from "./EndScreens";
 import { HUD } from "./HUD";
 import { Joystick } from "./Joystick";
@@ -48,18 +69,31 @@ function expandBbox(a: LatLng, b: LatLng, padding: number) {
   };
 }
 
+const BUILDING_MAX_RETRIES = 3;
+
 export function Game() {
   const mapRef = useRef<L.Map | null>(null);
   const playerRef = useRef<Player | null>(null);
   const zombiesRef = useRef<Zombie[]>([]);
   const facilitiesRef = useRef<GameFacility[]>([]);
-  const roadsRef = useRef<RoadsData>({ walkLines: [], walkPolygons: [] });
+  const roadsRef = useRef<RoadsData>({ walkLines: [], walkPolygons: [], blockPolygons: [] });
   const keysRef = useRef<InputState>({ ...INITIAL_INPUT_STATE });
   const joystickRef = useRef<JoystickVector>({ x: 0, y: 0 });
   const loopRef = useRef<number | null>(null);
   const lastTimeRef = useRef(0);
   const globalSirenRef = useRef({ active: false, timer: 0 });
   const zombieSpawnTimerRef = useRef(0);
+  const buildingFetchRef = useRef({
+    grid: null as ViewportGrid | null,
+    tileStore: new Map<string, BlockPolygon[]>(),
+    loadedCells: new Set<string>(),
+    loadingKeys: new Set<string>(),
+    retryCounts: new Map<string, number>(),
+    inflight: 0,
+    lastCell: null as GridCell | null,
+    lastCheckMs: 0,
+  });
+  const lastHudUpdateRef = useRef(0);
 
   const [gameState, setGameState] = useState<GameState>("SETUP");
   const [toast, setToast] = useState<string | null>(null);
@@ -70,9 +104,11 @@ export function Game() {
   const [sirenActive, setSirenActive] = useState(false);
   const [showHud, setShowHud] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
+  const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
   const endRef = useRef<LatLng | null>(null);
-  const startMarkersRef = useRef<L.Marker[]>([]);
+  const [destination, setDestination] = useState<LatLng | null>(null);
+  const startMarkersRef = useRef<L.Layer[]>([]);
   const sirenOverlayRef = useRef<HTMLDivElement | null>(null);
 
   const cleanupEntities = useCallback(() => {
@@ -88,6 +124,16 @@ export function Game() {
     facilitiesRef.current = [];
     startMarkersRef.current = [];
     zombieSpawnTimerRef.current = 0;
+    buildingFetchRef.current = {
+      grid: null,
+      tileStore: new Map(),
+      loadedCells: new Set(),
+      loadingKeys: new Set(),
+      retryCounts: new Map(),
+      inflight: 0,
+      lastCell: null,
+      lastCheckMs: 0,
+    };
     globalSirenRef.current = { active: false, timer: 0 };
   }, []);
 
@@ -111,7 +157,111 @@ export function Game() {
 
   const handleMapReady = useCallback((map: L.Map) => {
     mapRef.current = map;
+    setMapInstance(map);
   }, []);
+
+  const getPlayerPosition = useCallback(
+    (): LatLng | null => playerRef.current?.latlng ?? null,
+    [],
+  );
+
+  const syncActiveBlockPolygons = useCallback((cell: GridCell) => {
+    const state = buildingFetchRef.current;
+    pruneTileStore(state.tileStore, cell);
+    for (const key of [...state.loadedCells]) {
+      const [row, col] = key.split(":").map(Number);
+      if (Math.abs(row - cell.row) > 2 || Math.abs(col - cell.col) > 2) {
+        state.loadedCells.delete(key);
+        state.retryCounts.delete(key);
+      }
+    }
+    roadsRef.current.blockPolygons = collectSurroundingPolygons(cell, state.tileStore);
+  }, []);
+
+  const loadBuildingCell = useCallback(
+    async (cell: GridCell, options?: { priority?: boolean }): Promise<boolean> => {
+      const state = buildingFetchRef.current;
+      if (!state.grid) return false;
+
+      const key = cellStorageKey(cell.row, cell.col);
+      if (state.loadedCells.has(key)) return true;
+      if (state.loadingKeys.has(key)) return false;
+
+      const priority = options?.priority ?? false;
+      while (!priority && state.inflight >= BUILDING_MAX_CONCURRENT) {
+        await sleep(80);
+        if (state.loadedCells.has(key)) return true;
+      }
+
+      state.loadingKeys.add(key);
+      state.inflight += 1;
+
+      let success = false;
+      try {
+        const bbox = getSurroundBbox(cell, state.grid);
+        const raw = await fetchBuildings(bbox);
+        const wrapped = wrapPolygons(raw);
+
+        if (wrapped.length > 0) {
+          state.tileStore.set(key, wrapped);
+          state.loadedCells.add(key);
+          state.retryCounts.delete(key);
+          success = true;
+          if (state.lastCell) {
+            syncActiveBlockPolygons(state.lastCell);
+          }
+        } else {
+          const retries = (state.retryCounts.get(key) ?? 0) + 1;
+          state.retryCounts.set(key, retries);
+        }
+      } catch {
+        const retries = (state.retryCounts.get(key) ?? 0) + 1;
+        state.retryCounts.set(key, retries);
+      } finally {
+        state.loadingKeys.delete(key);
+        state.inflight -= 1;
+      }
+
+      return success;
+    },
+    [syncActiveBlockPolygons],
+  );
+
+  const scheduleViewportBuildingTiles = useCallback(
+    (lat: number, lng: number) => {
+      const map = mapRef.current;
+      if (!map) return;
+
+      const state = buildingFetchRef.current;
+      const now = performance.now();
+      if (now - state.lastCheckMs < BUILDING_TILE_CHECK_MS) return;
+      state.lastCheckMs = now;
+
+      if (!state.grid) {
+        state.grid = createViewportGrid(map);
+      }
+
+      const cell = getPlayerGridCell(lat, lng, state.grid);
+      const cellChanged = !isSameCell(state.lastCell, cell);
+
+      if (cellChanged) {
+        state.lastCell = cell;
+        syncActiveBlockPolygons(cell);
+      }
+
+      const key = cellStorageKey(cell.row, cell.col);
+      const retries = state.retryCounts.get(key) ?? 0;
+      const needsLoad =
+        !state.loadedCells.has(key) &&
+        !state.loadingKeys.has(key) &&
+        retries < BUILDING_MAX_RETRIES;
+
+      if (needsLoad || (cellChanged && retries > 0 && retries < BUILDING_MAX_RETRIES)) {
+        void loadBuildingCell(cell);
+      }
+    },
+    [loadBuildingCell, syncActiveBlockPolygons],
+  );
 
   const setupGame = useCallback(
     async (start: GeocodeResult, end: GeocodeResult) => {
@@ -128,6 +278,7 @@ export function Game() {
       const startLatLng: LatLng = { lat: start.lat, lng: start.lng };
       const endLatLng: LatLng = { lat: end.lat, lng: end.lng };
       endRef.current = endLatLng;
+      setDestination(endLatLng);
 
       const bounds = L.latLngBounds(
         [startLatLng.lat, startLatLng.lng],
@@ -176,8 +327,6 @@ export function Game() {
         setToast("시설물 데이터 로딩에 실패했습니다.");
       }
 
-      map.fitBounds(bounds, { padding: [50, 50] });
-
       const startMarker = L.marker([startLatLng.lat, startLatLng.lng], {
         icon: createEmojiIcon("🚩"),
       })
@@ -185,11 +334,20 @@ export function Game() {
         .bindPopup("출발지")
         .openPopup();
       const endMarker = L.marker([endLatLng.lat, endLatLng.lng], {
-        icon: createEmojiIcon("🏠"),
+        icon: createHomeIcon(),
+        zIndexOffset: 1000,
       })
         .addTo(map)
         .bindPopup("도착지");
-      startMarkersRef.current = [startMarker, endMarker];
+      const endPulse = L.circle([endLatLng.lat, endLatLng.lng], {
+        radius: 30,
+        color: "#22c55e",
+        fillColor: "#22c55e",
+        fillOpacity: 0.25,
+        weight: 4,
+        className: "home-marker-pulse",
+      }).addTo(map);
+      startMarkersRef.current = [startMarker, endMarker, endPulse];
 
       const isValid = createPositionValidator(roadsRef.current);
       const startPt = getNearestValidPoint(
@@ -199,6 +357,27 @@ export function Game() {
       );
       if (!isValid(startPt.lat, startPt.lng) && roadsRef.current.walkLines.length > 0) {
         Object.assign(startPt, getNearestValidPoint(startPt.lat, startPt.lng, roadsRef.current.walkLines));
+      }
+
+      map.setView([startPt.lat, startPt.lng], GAME_MAP_ZOOM);
+
+      setLoadingLabel("건물 데이터 로딩 중...");
+      try {
+        buildingFetchRef.current.grid = createViewportGrid(map);
+        const startCell = getPlayerGridCell(
+          startPt.lat,
+          startPt.lng,
+          buildingFetchRef.current.grid,
+        );
+        buildingFetchRef.current.lastCell = startCell;
+        for (let attempt = 0; attempt < BUILDING_MAX_RETRIES; attempt += 1) {
+          const ok = await loadBuildingCell(startCell, { priority: true });
+          if (ok) break;
+          await sleep(400);
+        }
+        syncActiveBlockPolygons(startCell);
+      } catch {
+        // 건물 없이도 진행
       }
 
       const facilityCallbacks = {
@@ -234,7 +413,7 @@ export function Game() {
         f.circle.on("click", interact);
       });
 
-      playerRef.current = new Player(startPt.lat, startPt.lng, map, isValid, {
+      playerRef.current = new Player(startPt.lat, startPt.lng, map, {
         onDamage: () => setToast("좀비에게 공격당했습니다!"),
         onHpChange: (newHp) => {
           setHp(newHp);
@@ -265,6 +444,7 @@ export function Game() {
           facilities: facilitiesRef.current,
           walkLines: roadsRef.current.walkLines,
           walkPolygons: roadsRef.current.walkPolygons,
+          blockPolygons: roadsRef.current.blockPolygons,
           endLatLng: endRef.current,
           map: mapRef.current,
           globalSirenActive: globalSirenRef.current.active,
@@ -278,8 +458,14 @@ export function Game() {
           timer: result.globalSirenTimer,
         };
         zombieSpawnTimerRef.current = result.zombieSpawnTimer;
-        setDistToHome(result.distToHome);
-        setSirenActive(result.globalSirenActive);
+
+        if (timestamp - lastHudUpdateRef.current > 200) {
+          lastHudUpdateRef.current = timestamp;
+          setDistToHome(result.distToHome);
+          setSirenActive(result.globalSirenActive);
+        }
+
+        scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
 
         if (!result.globalSirenActive && sirenOverlayRef.current) {
           sirenOverlayRef.current.remove();
@@ -296,7 +482,7 @@ export function Game() {
 
       loopRef.current = requestAnimationFrame(tick);
     },
-    [cleanupEntities, endGame, gameState],
+    [cleanupEntities, endGame, gameState, loadBuildingCell, syncActiveBlockPolygons],
   );
 
   useEffect(() => {
@@ -336,6 +522,7 @@ export function Game() {
     setHp(PLAYER_MAX_HP);
     setDistToHome(null);
     endRef.current = null;
+    setDestination(null);
     window.location.reload();
   };
 
@@ -346,6 +533,13 @@ export function Game() {
       {showHud && (
         <HUD hp={hp} maxHp={PLAYER_MAX_HP} distToHome={distToHome} sirenActive={sirenActive} />
       )}
+      <DestinationIndicator
+        map={mapInstance}
+        destination={destination}
+        getPlayerPosition={getPlayerPosition}
+        distToHome={distToHome}
+        active={gameState === "PLAYING"}
+      />
       <Joystick
         visible={showHud && showJoystick}
         onChange={(v) => {

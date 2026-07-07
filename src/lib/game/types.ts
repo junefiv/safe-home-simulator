@@ -1,6 +1,9 @@
+import type { BlockPolygon } from "./blockPolygon";
+
 export type GameState = "SETUP" | "PLAYING" | "GAMEOVER" | "VICTORY";
 
 export type FacilityType = "light" | "police" | "bell" | "cctv";
+export type { BlockPolygon };
 
 export interface LatLng {
   lat: number;
@@ -16,6 +19,8 @@ export interface WalkLine {
   maxLng: number;
   /** 이 도로 세그먼트에서 허용되는 중심선 거리(미터) */
   maxDistM: number;
+  /** OSM highway 태그 (대로·골목 구분용) */
+  highway?: string;
 }
 
 export interface Bbox {
@@ -49,6 +54,8 @@ export interface NormalizedFacility {
 export interface RoadsData {
   walkLines: WalkLine[];
   walkPolygons: LatLng[][];
+  /** 역사 건물 제외 — 통과 불가 영역 (bbox 캐시 포함) */
+  blockPolygons: BlockPolygon[];
 }
 
 export interface InputState {

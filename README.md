@@ -19,7 +19,8 @@ npm run dev
 |------|------|
 | `ODCLOUD_SERVICE_KEY` | 공공데이터포털 odcloud 인증키 (**경찰청 파출소 API**, URL 인코딩 키 권장) |
 | `DATA_GO_KR_SERVICE_KEY` | `ODCLOUD_SERVICE_KEY` 미설정 시 대체 키 |
-| `VWORLD_API_KEY` | **브이월드 지오코더** — 파출소 주소→좌표 변환 ([vworld.kr](https://www.vworld.kr/dev/v4po_openapi_s001.do) 발급) |
+| `VWORLD_API_KEY` | **브이월드** — 주소검색·지오코딩·건축물(2D데이터)·배경지도(WMS) |
+| `VWORLD_DOMAIN` | VWorld에 등록한 도메인 (`http://localhost:3000` 등). 2D데이터·WMS 미등록 시 건물/지도 API 실패 |
 | `BELL_API_URL` | 안심벨/비상벨 OpenAPI 엔드포인트 |
 | `LIGHT_API_URL` | 보안등 OpenAPI 엔드포인트 |
 | `USE_MOCK_FACILITIES` | `true`이면 bbox 내 mock 보안등·안심벨만 사용 (파출소 mock 없음) |
@@ -50,8 +51,10 @@ npm run dev
 
 ## API Routes
 
-- `GET /api/geocode?q=` — Nominatim 프록시
+- `GET /api/geocode?q=` — VWorld 검색 → Kakao → Nominatim
+- `GET /api/map-tiles/{z}/{x}/{y}.png` — VWorld Hybrid 배경지도 (실패 시 OSM)
 - `GET /api/roads?south&west&north&east` — Overpass 도로/역 데이터
+- `GET /api/buildings?south&west&north&east` — VWorld 건축물(LT_C_BLDGINFO) → Overpass 폴백
 - `GET /api/facilities?south&west&north&east` — 시설물 통합 (adapter + bbox 필터 + 캐시)
 
 adapter 필드 매핑은 `src/lib/public-data/adapters/`에서 API 응답 형식에 맞게 수정할 수 있습니다.

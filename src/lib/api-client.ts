@@ -1,4 +1,4 @@
-import type { Bbox, GeocodeResult, NormalizedFacility, RoadsData } from "@/lib/game/types";
+import type { Bbox, GeocodeResult, LatLng, NormalizedFacility, RoadsData } from "@/lib/game/types";
 import type { FacilitiesLoadReport } from "@/lib/public-data/facilities-load-report";
 import { logFacilitiesLoadReport } from "@/lib/public-data/facilities-load-report";
 
@@ -33,6 +33,22 @@ export async function fetchRoads(bbox: Bbox): Promise<RoadsData> {
     throw new Error(body?.error ?? "도로 데이터를 불러오지 못했습니다");
   }
   return (await res.json()) as RoadsData;
+}
+
+export async function fetchBuildings(bbox: Bbox): Promise<LatLng[][]> {
+  const params = new URLSearchParams({
+    south: String(bbox.south),
+    west: String(bbox.west),
+    north: String(bbox.north),
+    east: String(bbox.east),
+  });
+  const res = await fetch(`/api/buildings?${params}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? "건물 데이터를 불러오지 못했습니다");
+  }
+  const data = (await res.json()) as { blockPolygons: LatLng[][] };
+  return data.blockPolygons ?? [];
 }
 
 export interface FacilitiesFetchResult {
