@@ -1,5 +1,7 @@
 import { GameClient } from "@/components/game/GameClient";
+import { resolveGoogleMapsApiKey } from "@/lib/google-maps/loader";
 
 export default function Home() {
-  return <GameClient />;
+  const googleMapsApiKey = resolveGoogleMapsApiKey();
+  return <GameClient googleMapsApiKey={googleMapsApiKey} />;
 }

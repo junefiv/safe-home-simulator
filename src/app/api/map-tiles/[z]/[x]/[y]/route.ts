@@ -1,10 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isVworldConfigured } from "@/lib/vworld/config";
-import { fetchVworldTilePng } from "@/lib/vworld/tiles";
+import {
+  fetchVworldTilePng,
+  fetchVworldWmtsTilePng,
+} from "@/lib/vworld/tiles";
 
 export const dynamic = "force-dynamic";
 
 const OSM_TILE = "https://tile.openstreetmap.org";
+/** VWorld WMTS/WMS는 줌 19 초과 타일 미지원 */
+const VWORLD_MAX_ZOOM = 19;
+
+function clampTileForVworld(z: number, x: number, y: number) {
+  if (z <= VWORLD_MAX_ZOOM) return { z, x, y };
+  const shift = z - VWORLD_MAX_ZOOM;
+  return { z: VWORLD_MAX_ZOOM, x: x >> shift, y: y >> shift };
+}
+
+const PNG_HEADERS = {
+  "Content-Type": "image/png",
+  "Cache-Control": "public, max-age=86400",
+} as const;
 
 export async function GET(
   _request: NextRequest,
@@ -20,28 +36,32 @@ export async function GET(
   }
 
   if (isVworldConfigured()) {
-    const hybrid = await fetchVworldTilePng(zi, xi, yi, "Hybrid");
-    if (hybrid) {
-      return new NextResponse(hybrid, {
-        headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=86400",
-        },
-      });
+    const tile = clampTileForVworld(zi, xi, yi);
+
+    // 1) 배경지도 WMTS — 국토교통부 최신 기본지도
+    const base = await fetchVworldWmtsTilePng(tile.z, tile.x, tile.y, "Base");
+    if (base) {
+      return new NextResponse(base, { headers: PNG_HEADERS });
     }
 
-    const base = await fetchVworldTilePng(zi, xi, yi, "Base");
-    if (base) {
-      return new NextResponse(base, {
-        headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=86400",
-        },
-      });
+    // 2) WMS Hybrid — 항공+도로 합성
+    const hybrid = await fetchVworldTilePng(tile.z, tile.x, tile.y, "Hybrid");
+    if (hybrid) {
+      return new NextResponse(hybrid, { headers: PNG_HEADERS });
+    }
+
+    const wmsBase = await fetchVworldTilePng(tile.z, tile.x, tile.y, "Base");
+    if (wmsBase) {
+      return new NextResponse(wmsBase, { headers: PNG_HEADERS });
     }
   }
 
-  const fallback = await fetch(`${OSM_TILE}/${zi}/${xi}/${yi}.png`, {
+  const osmZ = Math.min(zi, 19);
+  const osmShift = zi - osmZ;
+  const osmX = osmShift > 0 ? xi >> osmShift : xi;
+  const osmY = osmShift > 0 ? yi >> osmShift : yi;
+
+  const fallback = await fetch(`${OSM_TILE}/${osmZ}/${osmX}/${osmY}.png`, {
     headers: { "User-Agent": "SafeHomeSimulator/1.0" },
     signal: AbortSignal.timeout(10_000),
   });

@@ -43,6 +43,20 @@ export function geometryToBlockPolygons(geometry: GeoJsonGeometry): LatLng[][] {
   return [];
 }
 
+/** 역사·지하철역 — 통과 허용 (건물 충돌 제외) */
+export function isStationVworldBuilding(props?: Record<string, unknown>): boolean {
+  if (!props) return false;
+  const text = [
+    props.main_purps_nm,
+    props.etc_purps,
+    props.bldg_nm,
+    props.regstr_kind_nm,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /지하철|철도|역사|환승|전철|역\b|station|subway/i.test(text);
+}
+
 /** VWorld 건축물 — 문화재·등록문화재 등은 통과 허용 */
 export function isHistoricVworldBuilding(props?: Record<string, unknown>): boolean {
   if (!props) return false;
@@ -64,6 +78,7 @@ export function featuresToBlockPolygons(features: GeoJsonFeature[]): LatLng[][] 
   for (const feature of features) {
     if (!feature.geometry) continue;
     if (isHistoricVworldBuilding(feature.properties)) continue;
+    if (isStationVworldBuilding(feature.properties)) continue;
     polygons.push(...geometryToBlockPolygons(feature.geometry));
   }
 

@@ -8,6 +8,7 @@ import {
   BUILDING_TILE_CHECK_MS,
   FACILITIES_BBOX_PADDING,
   GAME_MAP_ZOOM,
+  VWORLD_MAP_ZOOM,
   PLAYER_MAX_HP,
   ROADS_BOUNDS_PADDING,
 } from "@/lib/game/constants";
@@ -71,7 +72,7 @@ function expandBbox(a: LatLng, b: LatLng, padding: number) {
 
 const BUILDING_MAX_RETRIES = 3;
 
-export function Game() {
+export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const mapRef = useRef<L.Map | null>(null);
   const playerRef = useRef<Player | null>(null);
   const zombiesRef = useRef<Zombie[]>([]);
@@ -284,7 +285,9 @@ export function Game() {
         [startLatLng.lat, startLatLng.lng],
         [endLatLng.lat, endLatLng.lng],
       );
-      const padded = bounds.pad(ROADS_BOUNDS_PADDING);
+      const routeBounds = bounds.pad(ROADS_BOUNDS_PADDING);
+      const viewBounds = map.getBounds().pad(0.15);
+      const padded = routeBounds.extend(viewBounds);
       const roadsBbox = {
         south: padded.getSouth(),
         west: padded.getWest(),
@@ -359,7 +362,8 @@ export function Game() {
         Object.assign(startPt, getNearestValidPoint(startPt.lat, startPt.lng, roadsRef.current.walkLines));
       }
 
-      map.setView([startPt.lat, startPt.lng], GAME_MAP_ZOOM);
+      const playZoom = googleMapsApiKey.trim() ? GAME_MAP_ZOOM : VWORLD_MAP_ZOOM;
+      map.setView([startPt.lat, startPt.lng], playZoom);
 
       setLoadingLabel("건물 데이터 로딩 중...");
       try {
@@ -528,7 +532,11 @@ export function Game() {
 
   return (
     <div className="game-root">
-      <MapView center={[37.5665, 126.978]} onMapReady={handleMapReady} />
+      <MapView
+        center={[37.5665, 126.978]}
+        googleMapsApiKey={googleMapsApiKey}
+        onMapReady={handleMapReady}
+      />
       <Toast message={toast} onClear={() => setToast(null)} />
       {showHud && (
         <HUD hp={hp} maxHp={PLAYER_MAX_HP} distToHome={distToHome} sirenActive={sirenActive} />

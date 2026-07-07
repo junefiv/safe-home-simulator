@@ -7,6 +7,10 @@ const Game = dynamic(
   { ssr: false },
 );
 
-export function GameClient() {
-  return <Game />;
+interface GameClientProps {
+  googleMapsApiKey?: string;
+}
+
+export function GameClient({ googleMapsApiKey = "" }: GameClientProps) {
+  return <Game googleMapsApiKey={googleMapsApiKey} />;
 }

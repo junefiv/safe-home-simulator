@@ -6,7 +6,7 @@ import { featuresToBlockPolygons, type GeoJsonFeature } from "./geojson";
 const VWORLD_DATA_URL = "https://api.vworld.kr/req/data";
 const BUILDING_LAYER = "LT_C_BLDGINFO";
 const PAGE_SIZE = 1000;
-const MAX_PAGES = 8;
+const MAX_PAGES = 20;
 
 interface VworldDataResponse {
   response?: {
@@ -88,7 +88,7 @@ export async function fetchVworldBuildings(bbox: Bbox): Promise<LatLng[][]> {
     if (status === "ERROR") {
       const err = json.response?.error;
       throw new VworldApiError(
-        err?.text ?? "VWorld 건물 API 오류",
+        `${err?.text ?? "VWorld 건물 API 오류"} (domain=${domain} — 개발자센터 서비스URL과 VWORLD_DOMAIN이 같아야 합니다)`,
         err?.code,
       );
     }

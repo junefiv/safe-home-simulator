@@ -21,6 +21,8 @@ export interface WalkLine {
   maxDistM: number;
   /** OSM highway 태그 (대로·골목 구분용) */
   highway?: string;
+  /** 교차로 갭 메우기용 보조 세그먼트 — 건물 충돌 판정에는 사용 안 함 */
+  isBridge?: boolean;
 }
 
 export interface Bbox {

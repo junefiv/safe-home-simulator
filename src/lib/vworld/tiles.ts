@@ -3,6 +3,7 @@ import { resolveVworldApiKey, resolveVworldDomain } from "./config";
 const VWORLD_WMS_URL = "https://api.vworld.kr/req/wms";
 
 export type VworldMapLayer = "Base" | "Hybrid" | "Satellite";
+export type VworldWmtsLayer = "Base" | "Satellite" | "Hybrid" | "midnight" | "gray";
 
 /** Leaflet XYZ 타일 → EPSG:3857 bbox */
 export function tileBbox3857(z: number, x: number, y: number): [number, number, number, number] {
@@ -14,6 +15,22 @@ export function tileBbox3857(z: number, x: number, y: number): [number, number, 
   const maxY = world - y * tile;
   const minY = maxY - tile;
   return [minX, minY, maxX, maxY];
+}
+
+/** VWorld 배경지도 WMTS — Leaflet {z}/{x}/{y} → VWorld {z}/{tileRow}/{tileCol} */
+export function buildVworldWmtsTileUrl(
+  z: number,
+  x: number,
+  y: number,
+  layer: VworldWmtsLayer = "Base",
+): string {
+  const key = resolveVworldApiKey();
+  const domain = resolveVworldDomain();
+  const url = new URL(
+    `https://api.vworld.kr/req/wmts/1.0.0/${key}/${layer}/${z}/${y}/${x}.png`,
+  );
+  url.searchParams.set("domain", domain);
+  return url.toString();
 }
 
 export function buildVworldWmsTileUrl(
@@ -42,6 +59,25 @@ export function buildVworldWmsTileUrl(
   url.searchParams.set("domain", domain);
 
   return url.toString();
+}
+
+export async function fetchVworldWmtsTilePng(
+  z: number,
+  x: number,
+  y: number,
+  layer: VworldWmtsLayer = "Base",
+): Promise<ArrayBuffer | null> {
+  if (!resolveVworldApiKey()) return null;
+
+  const res = await fetch(buildVworldWmtsTileUrl(z, x, y, layer), {
+    cache: "force-cache",
+    signal: AbortSignal.timeout(12_000),
+  });
+
+  const type = res.headers.get("content-type") ?? "";
+  if (!res.ok || !type.includes("image")) return null;
+
+  return res.arrayBuffer();
 }
 
 export async function fetchVworldTilePng(

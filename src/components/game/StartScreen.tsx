@@ -105,26 +105,6 @@ export function StartScreen({
     };
   }, []);
 
-  const handleGps = () => {
-    if (!navigator.geolocation) {
-      onToast("GPS를 지원하지 않는 브라우저입니다.");
-      return;
-    }
-    onToast("GPS 위치 확인 중...");
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setStartPick({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          name: "내 위치 (GPS)",
-        });
-        setStartText("내 위치 (GPS)");
-        onToast("GPS 위치 적용 완료");
-      },
-      () => onToast("GPS 권한이 거부되었거나 실패했습니다."),
-    );
-  };
-
   const handleSubmit = async () => {
     if (!startText.trim() || !endText.trim()) {
       onToast("출발지와 도착지를 모두 입력해주세요.");
@@ -166,28 +146,18 @@ export function StartScreen({
             <label className="block text-sm font-medium text-gray-300 mb-1">
               출발지 (지하철역, 정류장 등)
             </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                autoComplete="off"
-                value={startText}
-                onChange={(e) => {
-                  setStartText(e.target.value);
-                  setStartPick(null);
-                  runSuggestions(e.target.value, true);
-                }}
-                placeholder="예: 강남역, 테헤란로 152"
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
-              />
-              <button
-                type="button"
-                onClick={handleGps}
-                className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-lg text-sm whitespace-nowrap transition"
-                title="현재 내 위치"
-              >
-                📍 GPS
-              </button>
-            </div>
+            <input
+              type="text"
+              autoComplete="off"
+              value={startText}
+              onChange={(e) => {
+                setStartText(e.target.value);
+                setStartPick(null);
+                runSuggestions(e.target.value, true);
+              }}
+              placeholder="예: 강남역, 테헤란로 152"
+              className="w-full px-4 py-2 bg-gray-900 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+            />
             {showStartList && (
               <ul className="absolute z-50 w-full bg-gray-800 border border-gray-600 rounded-lg mt-1 max-h-48 overflow-y-auto shadow-xl top-full left-0 text-left">
                 <SuggestionList

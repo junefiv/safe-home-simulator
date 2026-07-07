@@ -16,7 +16,7 @@ import {
   ZOMBIE_FLEE_SPEED_MULTIPLIER,
 } from "./constants";
 import { haversineDistance } from "./geo";
-import { slideMove } from "./roadValidation";
+import { navigateToward, slideMove, ZOMBIE_PROBE_ANGLES } from "./roadValidation";
 import type {
   FacilityType,
   InputState,
@@ -238,11 +238,12 @@ export class Zombie {
 
       const nextLat = this.lat + latDiff;
       const nextLng = this.lng + lngDiff;
-      const moved = slideMove(
+      const moved = navigateToward(
         { lat: this.lat, lng: this.lng },
-        nextLat,
-        nextLng,
+        { lat: nextLat, lng: nextLng },
+        metersMoved,
         isValid,
+        { probeAngles: ZOMBIE_PROBE_ANGLES },
       );
       this.lat = moved.lat;
       this.lng = moved.lng;

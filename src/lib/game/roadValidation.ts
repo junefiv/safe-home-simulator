@@ -1,6 +1,12 @@
 import type { BlockPolygon } from "./blockPolygon";
 import { wrapPolygons } from "./blockPolygon";
-import { ROAD_SEGMENT_TOLERANCE_M } from "./constants";
+import {
+  ROAD_BRIDGE_MAX_M,
+  ROAD_JUNCTION_SLACK_M,
+  ROAD_SEGMENT_TOLERANCE_M,
+  ROAD_STRICT_ENDPOINT_SLACK_M,
+} from "./constants";
+import { haversineDistance } from "./geo";
 import type { LatLng, RoadsData, WalkLine } from "./types";
 
 export function isInsidePolygon(point: LatLng, polygon: LatLng[]): boolean {
@@ -67,24 +73,40 @@ interface RoadMatch {
   major: boolean;
 }
 
-function matchWalkRoad(
+interface RoadMatchOptions {
+  /** false면 OSM 원본 세그먼트만 (건물 안 판정용) */
+  includeBridges?: boolean;
+  endpointSlackM?: number;
+}
+
+function matchWalkRoadOnLines(
   pt: LatLng,
   lat: number,
   lng: number,
   walkLines: WalkLine[],
-  walkPolygons: LatLng[][],
+  options: RoadMatchOptions = {},
 ): RoadMatch {
-  for (const poly of walkPolygons) {
-    if (isInsidePolygon(pt, poly)) return { onRoad: true, major: true };
-  }
+  const includeBridges = options.includeBridges ?? true;
+  const endpointSlackM = options.endpointSlackM ?? ROAD_JUNCTION_SLACK_M;
 
   for (const line of walkLines) {
+    if (!includeBridges && line.isBridge) continue;
+
     if (lat < line.minLat || lat > line.maxLat || lng < line.minLng || lng > line.maxLng) {
       continue;
     }
     if (distanceToSegment(pt, line.p1, line.p2) <= line.maxDistM) {
       const major = isMajorHighway(line.highway) || line.maxDistM >= 28;
       return { onRoad: true, major };
+    }
+    if (endpointSlackM > 0) {
+      const endSlack = line.maxDistM + endpointSlackM;
+      if (
+        haversineDistance(pt, line.p1) <= endSlack ||
+        haversineDistance(pt, line.p2) <= endSlack
+      ) {
+        return { onRoad: true, major: isMajorHighway(line.highway) };
+      }
     }
   }
 
@@ -158,8 +180,108 @@ function isInsideBlockPolygon(pt: LatLng, block: BlockPolygon): boolean {
   return isInsidePolygon(pt, block.points);
 }
 
+function isInsideStationZone(pt: LatLng, walkPolygons: LatLng[][]): boolean {
+  for (const poly of walkPolygons) {
+    if (isInsidePolygon(pt, poly)) return true;
+  }
+  return false;
+}
+
+function isInsideAnyBuilding(pt: LatLng, blockPolygons: BlockPolygon[]): boolean {
+  for (const block of blockPolygons) {
+    if (isInsideBlockPolygon(pt, block)) return true;
+  }
+  return false;
+}
+
 function latLngPadForMeters(lat: number, meters: number): number {
   return meters / 111111;
+}
+
+function makeWalkLine(
+  p1: LatLng,
+  p2: LatLng,
+  maxDistM: number,
+  highway?: string,
+  isBridge = false,
+): WalkLine {
+  const segPad = latLngPadForMeters(p1.lat, maxDistM + ROAD_JUNCTION_SLACK_M);
+  return {
+    p1,
+    p2,
+    minLat: Math.min(p1.lat, p2.lat) - segPad,
+    maxLat: Math.max(p1.lat, p2.lat) + segPad,
+    minLng: Math.min(p1.lng, p2.lng) - segPad,
+    maxLng: Math.max(p1.lng, p2.lng) + segPad,
+    maxDistM,
+    highway,
+    isBridge,
+  };
+}
+
+interface RoadEndpoint {
+  pt: LatLng;
+  maxDistM: number;
+  highway?: string;
+}
+
+/** OSM way 끝점이 1~16m 떨어진 곳을 잇는 보조 세그먼트 (교차로·타일 경계 끊김 완화) */
+function bridgeRoadGaps(walkLines: WalkLine[]): WalkLine[] {
+  const endpoints: RoadEndpoint[] = [];
+  for (const line of walkLines) {
+    endpoints.push({ pt: line.p1, maxDistM: line.maxDistM, highway: line.highway });
+    endpoints.push({ pt: line.p2, maxDistM: line.maxDistM, highway: line.highway });
+  }
+  if (endpoints.length < 2) return walkLines;
+
+  const cellDeg = ROAD_BRIDGE_MAX_M / 111111;
+  const grid = new Map<string, RoadEndpoint[]>();
+
+  const cellKey = (lat: number, lng: number) =>
+    `${Math.floor(lat / cellDeg)}:${Math.floor(lng / cellDeg)}`;
+
+  for (const ep of endpoints) {
+    const key = cellKey(ep.pt.lat, ep.pt.lng);
+    const bucket = grid.get(key);
+    if (bucket) bucket.push(ep);
+    else grid.set(key, [ep]);
+  }
+
+  const bridges: WalkLine[] = [];
+  const seen = new Set<string>();
+
+  for (const [key, bucket] of grid) {
+    const [row, col] = key.split(":").map(Number);
+    const neighbors: RoadEndpoint[] = [...bucket];
+
+    for (let dr = -1; dr <= 1; dr += 1) {
+      for (let dc = -1; dc <= 1; dc += 1) {
+        if (dr === 0 && dc === 0) continue;
+        const nearby = grid.get(`${row + dr}:${col + dc}`);
+        if (nearby) neighbors.push(...nearby);
+      }
+    }
+
+    for (const a of bucket) {
+      for (const b of neighbors) {
+        if (a === b) continue;
+        const dist = haversineDistance(a.pt, b.pt);
+        if (dist < 0.8 || dist > ROAD_BRIDGE_MAX_M) continue;
+
+        const pairKey =
+          a.pt.lat < b.pt.lat || (a.pt.lat === b.pt.lat && a.pt.lng <= b.pt.lng)
+            ? `${a.pt.lat.toFixed(6)}:${a.pt.lng.toFixed(6)}|${b.pt.lat.toFixed(6)}:${b.pt.lng.toFixed(6)}`
+            : `${b.pt.lat.toFixed(6)}:${b.pt.lng.toFixed(6)}|${a.pt.lat.toFixed(6)}:${a.pt.lng.toFixed(6)}`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
+
+        const width = Math.max(a.maxDistM, b.maxDistM, ROAD_SEGMENT_TOLERANCE_M);
+        bridges.push(makeWalkLine(a.pt, b.pt, width, a.highway ?? b.highway, true));
+      }
+    }
+  }
+
+  return bridges.length > 0 ? [...walkLines, ...bridges] : walkLines;
 }
 
 export function createPositionValidator(roads: RoadsData) {
@@ -178,17 +300,25 @@ export function isValidPosition(
   if (walkLines.length === 0 && walkPolygons.length === 0) return false;
 
   const pt: LatLng = { lat, lng };
-  const road = matchWalkRoad(pt, lat, lng, walkLines, walkPolygons);
 
-  // 대로(면목로 등): 건물 데이터가 도로와 겹쳐도 통행
-  if (road.onRoad && road.major) return true;
+  // 지하철역·기차역 구역은 건물과 무관하게 통과
+  if (isInsideStationZone(pt, walkPolygons)) return true;
 
-  // 골목·보조도로·도로 밖: 건물 내부 차단
-  for (const block of blockPolygons) {
-    if (isInsideBlockPolygon(pt, block)) return false;
+  const insideBuilding = isInsideAnyBuilding(pt, blockPolygons);
+
+  // 건물 안: OSM 도로 중심선 위만 통과 (보조 bridge·넓은 여유 미적용)
+  if (insideBuilding) {
+    return matchWalkRoadOnLines(pt, lat, lng, walkLines, {
+      includeBridges: false,
+      endpointSlackM: ROAD_STRICT_ENDPOINT_SLACK_M,
+    }).onRoad;
   }
 
-  return road.onRoad;
+  // 건물 밖: 도로 + 교차로 연결(bridge) 허용
+  return matchWalkRoadOnLines(pt, lat, lng, walkLines, {
+    includeBridges: true,
+    endpointSlackM: ROAD_JUNCTION_SLACK_M,
+  }).onRoad;
 }
 
 export function getNearestValidPoint(
@@ -224,16 +354,101 @@ export function slideMove(
     return { lat: nextLat, lng: nextLng };
   }
 
-  const attempts: LatLng[] = [
-    { lat: nextLat, lng: current.lng },
-    { lat: current.lat, lng: nextLng },
+  const dy = nextLat - current.lat;
+  const dx = nextLng - current.lng;
+  const dist = Math.hypot(dx, dy);
+  if (dist === 0) return current;
+
+  const approxMeters = dist * 111111;
+  return navigateToward(
+    current,
     { lat: nextLat, lng: nextLng },
+    approxMeters,
+    isValid,
+    { probeAngles: PLAYER_PROBE_ANGLES },
+  );
+}
+
+const PLAYER_PROBE_ANGLES = [0, 28, -28, 55, -55, 82, -82, 110, -110];
+
+/** 좀비용 — 더 많은 각도로 건물 모서리 우회 */
+const ZOMBIE_PROBE_ANGLES = [
+  0, 12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 75, -75, 90, -90, 105, -105,
+  120, -120, 135, -135, 150, -150,
+];
+
+function deltaFromHeading(
+  lat: number,
+  headingRad: number,
+  meters: number,
+): { lat: number; lng: number } {
+  const dy = Math.sin(headingRad);
+  const dx = Math.cos(headingRad);
+  return {
+    lat: (dy * meters) / 111111,
+    lng: (dx * meters) / (111111 * Math.cos((lat * Math.PI) / 180)),
+  };
+}
+
+export interface NavigateOptions {
+  flee?: boolean;
+  probeAngles?: number[];
+}
+
+/**
+ * 목표 방향으로 이동. 막히면 좌우 각도·짧은 보폭으로 건물을 우회.
+ */
+export function navigateToward(
+  current: LatLng,
+  target: LatLng,
+  metersMoved: number,
+  isValid: (lat: number, lng: number) => boolean,
+  options: NavigateOptions = {},
+): LatLng {
+  let dy = target.lat - current.lat;
+  let dx = target.lng - current.lng;
+  const dist = Math.hypot(dx, dy);
+  if (dist === 0 || metersMoved <= 0) return current;
+
+  dx /= dist;
+  dy /= dist;
+  if (options.flee) {
+    dx = -dx;
+    dy = -dy;
+  }
+
+  const baseAngle = Math.atan2(dy, dx);
+  const angles = options.probeAngles ?? PLAYER_PROBE_ANGLES;
+
+  for (const stepScale of [1, 0.65, 0.4]) {
+    const stepM = metersMoved * stepScale;
+    for (const deg of angles) {
+      const delta = deltaFromHeading(current.lat, baseAngle + (deg * Math.PI) / 180, stepM);
+      const nextLat = current.lat + delta.lat;
+      const nextLng = current.lng + delta.lng;
+      if (isValid(nextLat, nextLng)) {
+        return { lat: nextLat, lng: nextLng };
+      }
+    }
+  }
+
+  // 벽 따라 미끄러짐 — 이동 방향에 수직
+  for (const deg of [90, -90, 120, -120]) {
+    const delta = deltaFromHeading(current.lat, baseAngle + (deg * Math.PI) / 180, metersMoved * 0.45);
+    const nextLat = current.lat + delta.lat;
+    const nextLng = current.lng + delta.lng;
+    if (isValid(nextLat, nextLng)) {
+      return { lat: nextLat, lng: nextLng };
+    }
+  }
+
+  const attempts: LatLng[] = [
+    { lat: target.lat, lng: current.lng },
+    { lat: current.lat, lng: target.lng },
     {
-      lat: current.lat + (nextLat - current.lat) * 0.5,
-      lng: current.lng + (nextLng - current.lng) * 0.5,
+      lat: current.lat + (target.lat - current.lat) * 0.5,
+      lng: current.lng + (target.lng - current.lng) * 0.5,
     },
-    { lat: nextLat, lng: current.lng + (nextLng - current.lng) * 0.5 },
-    { lat: current.lat + (nextLat - current.lat) * 0.5, lng: nextLng },
   ];
 
   for (const pt of attempts) {
@@ -242,6 +457,8 @@ export function slideMove(
 
   return current;
 }
+
+export { ZOMBIE_PROBE_ANGLES };
 
 interface OverpassElement {
   type?: string;
@@ -254,6 +471,9 @@ function isStationElement(el: OverpassElement): boolean {
     el.tags &&
       (el.tags.building === "train_station" ||
         el.tags.railway === "station" ||
+        el.tags.railway === "subway_entrance" ||
+        el.tags.station === "subway" ||
+        el.tags.subway === "yes" ||
         el.tags.public_transport === "station"),
   );
 }
@@ -327,19 +547,18 @@ export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
     for (let i = 0; i < el.geometry.length - 1; i++) {
       const p1 = el.geometry[i];
       const p2 = el.geometry[i + 1];
-      const segPad = latLngPadForMeters(p1.lat, maxDistM);
-      walkLines.push({
-        p1: { lat: p1.lat, lng: p1.lon },
-        p2: { lat: p2.lat, lng: p2.lon },
-        minLat: Math.min(p1.lat, p2.lat) - segPad,
-        maxLat: Math.max(p1.lat, p2.lat) + segPad,
-        minLng: Math.min(p1.lon, p2.lon) - segPad,
-        maxLng: Math.max(p1.lon, p2.lon) + segPad,
-        maxDistM,
-        highway,
-      });
+      walkLines.push(
+        makeWalkLine(
+          { lat: p1.lat, lng: p1.lon },
+          { lat: p2.lat, lng: p2.lon },
+          maxDistM,
+          highway,
+        ),
+      );
     }
   }
 
-  return { walkLines, walkPolygons, blockPolygons: [] };
+  const bridged = bridgeRoadGaps(walkLines);
+
+  return { walkLines: bridged, walkPolygons, blockPolygons: [] };
 }
