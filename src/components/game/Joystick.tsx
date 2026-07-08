@@ -13,7 +13,10 @@ export function Joystick({ onChange, visible }: JoystickProps) {
   const [knobOffset, setKnobOffset] = useState({ x: 0, y: 0 });
   const dragging = useRef(false);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
   const updateFromEvent = useCallback((clientX: number, clientY: number) => {
     const zone = zoneRef.current;

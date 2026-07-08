@@ -57,6 +57,7 @@ export function MapView({
       touchZoom={false}
       boxZoom={false}
       keyboard={false}
+      preferCanvas
       attributionControl={!useGoogle}
       className="game-map"
       style={{ width: "100vw", height: "100vh" }}

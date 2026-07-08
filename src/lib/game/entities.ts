@@ -4,6 +4,8 @@ import {
   BELL_COUNTDOWN_MS,
   BELL_INTERACT_DISTANCE_M,
   BELL_RADIUS_M,
+  BELL_STUN_DURATION_MS,
+  CCTV_RADIUS_M,
   GLOBAL_SIREN_DURATION_MS,
   LIGHT_RADIUS_M,
   LIGHT_SLOW_FACTOR,
@@ -14,14 +16,22 @@ import {
   ZOMBIE_BASE_SPEED_MPS,
   ZOMBIE_COLLISION_DISTANCE_M,
   ZOMBIE_FLEE_SPEED_MULTIPLIER,
+  STORE_FLEE_DURATION_MS,
+  STORE_COOLDOWN_MS,
 } from "./constants";
 import { haversineDistance } from "./geo";
-import { navigateToward, slideMove, ZOMBIE_PROBE_ANGLES } from "./roadValidation";
+import {
+  navigateToward,
+  slideMove,
+  ZOMBIE_PROBE_ANGLES,
+  type MovementResolver,
+} from "./roadValidation";
 import type {
   FacilityType,
   InputState,
   JoystickVector,
   LatLng,
+  MovementLayer,
   NormalizedFacility,
 } from "./types";
 
@@ -44,7 +54,7 @@ export function createHomeIcon(): L.DivIcon {
 }
 
 export type BellState = "IDLE" | "COUNTDOWN" | "COOLDOWN";
-export type ZombieState = "CHASE" | "FLEE";
+export type ZombieState = "CHASE" | "FLEE" | "STUNNED" | "WANDER";
 
 export interface PlayerCallbacks {
   onDamage: () => void;
@@ -58,6 +68,7 @@ export class Player {
   hp = PLAYER_MAX_HP;
   invulnerableTime = 0;
   marker: L.Marker;
+  movementLayer: MovementLayer = "surface";
 
   constructor(
     lat: number,
@@ -82,7 +93,8 @@ export class Player {
     keys: InputState,
     joystick: JoystickVector,
     playing: boolean,
-    isValid: (lat: number, lng: number) => boolean,
+    movement: MovementResolver,
+    speedMultiplier = 1,
   ): void {
     if (!playing) return;
 
@@ -105,19 +117,21 @@ export class Player {
       dy /= length;
     }
 
-    const metersMoved = this.speed * (dt / 1000);
+    const metersMoved = this.speed * speedMultiplier * (dt / 1000);
     const latDiff = (dy * metersMoved) / 111111;
     const lngDiff =
       (dx * metersMoved) / (111111 * Math.cos((this.lat * Math.PI) / 180));
 
     const nextLat = this.lat + latDiff;
     const nextLng = this.lng + lngDiff;
+    const current = { lat: this.lat, lng: this.lng };
     const moved = slideMove(
-      { lat: this.lat, lng: this.lng },
+      current,
       nextLat,
       nextLng,
-      isValid,
+      (lat, lng) => movement.canMove(current, { lat, lng }, this.movementLayer),
     );
+    this.movementLayer = movement.resolveLayer(current, moved, this.movementLayer);
     this.lat = moved.lat;
     this.lng = moved.lng;
 
@@ -144,6 +158,13 @@ export class Player {
     this.callbacks.onHpChange(this.hp);
     this.callbacks.onDamage();
   }
+
+  heal(amount = 1): void {
+    const nextHp = Math.min(PLAYER_MAX_HP, this.hp + amount);
+    if (nextHp === this.hp) return;
+    this.hp = nextHp;
+    this.callbacks.onHpChange(this.hp);
+  }
 }
 
 export class Zombie {
@@ -153,10 +174,19 @@ export class Zombie {
   speed = ZOMBIE_BASE_SPEED_MPS;
   state: ZombieState = "CHASE";
   marker: L.Marker;
+  movementLayer: MovementLayer;
+  wanderHeading = 0;
+  wanderTimer = 0;
 
-  constructor(lat: number, lng: number, map: L.Map) {
+  constructor(
+    lat: number,
+    lng: number,
+    map: L.Map,
+    movementLayer: MovementLayer = "surface",
+  ) {
     this.lat = lat;
     this.lng = lng;
+    this.movementLayer = movementLayer;
     this.marker = L.marker([lat, lng], {
       icon: createEmojiIcon("🧟", 35),
       zIndexOffset: 500,
@@ -172,8 +202,21 @@ export class Zombie {
     player: Player,
     facilities: GameFacility[],
     globalSirenActive: boolean,
-    isValid: (lat: number, lng: number) => boolean,
+    globalStunActive: boolean,
+    movement: MovementResolver,
   ): void {
+    const previousState = this.state;
+    if (globalStunActive) {
+      this.state = "STUNNED";
+      this.speed = 0;
+      if (previousState !== "STUNNED") {
+        this.marker.setIcon(createEmojiIcon("⚡🧟⚡", 35));
+      }
+      this.marker.setOpacity(Math.floor(Date.now() / 120) % 2 === 0 ? 0.45 : 1);
+      return;
+    }
+    this.marker.setOpacity(1);
+
     let targetLat = player.lat;
     let targetLng = player.lng;
 
@@ -181,11 +224,13 @@ export class Zombie {
     let policeLat = 0;
     let policeLng = 0;
     let inLight = false;
+    let inCctv = false;
 
     const self = this.latlng;
     for (const f of facilities) {
       if (
         f.type === "police" &&
+        f.activated &&
         haversineDistance(self, f.latlng) < f.radius
       ) {
         nearPolice = true;
@@ -195,27 +240,41 @@ export class Zombie {
       if (f.type === "light" && haversineDistance(self, f.latlng) < f.radius) {
         inLight = true;
       }
+      if (f.type === "cctv" && haversineDistance(self, f.latlng) < f.radius) {
+        inCctv = true;
+      }
     }
 
-    if (globalSirenActive) {
-      this.state = "FLEE";
-      targetLat = player.lat;
-      targetLng = player.lng;
-    } else if (nearPolice) {
+    if (nearPolice) {
       this.state = "FLEE";
       targetLat = policeLat;
       targetLng = policeLng;
+    } else if (globalSirenActive) {
+      this.state = "FLEE";
+      targetLat = player.lat;
+      targetLng = player.lng;
+    } else if (inCctv) {
+      this.state = "WANDER";
+      this.wanderTimer -= dt;
+      if (this.wanderTimer <= 0) {
+        this.wanderHeading = Math.random() * Math.PI * 2;
+        this.wanderTimer = 700 + Math.random() * 900;
+      }
+      targetLat = this.lat + Math.sin(this.wanderHeading) * 0.001;
+      targetLng = this.lng + Math.cos(this.wanderHeading) * 0.001;
     } else {
       this.state = "CHASE";
     }
 
-    this.speed =
-      inLight && this.state === "CHASE"
-        ? this.baseSpeed * LIGHT_SLOW_FACTOR
-        : this.baseSpeed;
-    this.marker.setIcon(
-      createEmojiIcon(this.state === "FLEE" ? "🏃" : "🧟", 35),
-    );
+    this.speed = inLight ? this.baseSpeed * LIGHT_SLOW_FACTOR : this.baseSpeed;
+    if (this.state !== previousState) {
+      this.marker.setIcon(
+        createEmojiIcon(
+          this.state === "FLEE" ? "🏃" : this.state === "WANDER" ? "❓🧟" : "🧟",
+          35,
+        ),
+      );
+    }
 
     let dy = targetLat - this.lat;
     let dx = targetLng - this.lng;
@@ -228,7 +287,7 @@ export class Zombie {
       if (this.state === "FLEE") {
         dy = -dy;
         dx = -dx;
-        this.speed = this.baseSpeed * ZOMBIE_FLEE_SPEED_MULTIPLIER;
+        this.speed *= ZOMBIE_FLEE_SPEED_MULTIPLIER;
       }
 
       const metersMoved = this.speed * (dt / 1000);
@@ -238,20 +297,40 @@ export class Zombie {
 
       const nextLat = this.lat + latDiff;
       const nextLng = this.lng + lngDiff;
+      const current = { lat: this.lat, lng: this.lng };
       const moved = navigateToward(
-        { lat: this.lat, lng: this.lng },
+        current,
         { lat: nextLat, lng: nextLng },
         metersMoved,
-        isValid,
+        (lat, lng) =>
+          movement.canMove(current, { lat, lng }, this.movementLayer) &&
+          !facilities.some(
+            (facility) =>
+              facility.type === "police" &&
+              facility.activated &&
+              haversineDistance({ lat, lng }, facility.latlng) < facility.radius,
+          ),
         { probeAngles: ZOMBIE_PROBE_ANGLES },
       );
+      this.movementLayer = movement.resolveLayer(current, moved, this.movementLayer);
       this.lat = moved.lat;
       this.lng = moved.lng;
       this.marker.setLatLng([this.lat, this.lng]);
     }
 
     const distToPlayer = haversineDistance(this.latlng, player.latlng);
-    if (this.state === "CHASE" && distToPlayer < ZOMBIE_COLLISION_DISTANCE_M) {
+    const playerProtected = facilities.some(
+      (facility) =>
+        facility.type === "police" &&
+        facility.activated &&
+        haversineDistance(player.latlng, facility.latlng) < facility.radius,
+    );
+    if (
+      this.state === "CHASE" &&
+      !playerProtected &&
+      this.movementLayer === player.movementLayer &&
+      distToPlayer < ZOMBIE_COLLISION_DISTANCE_M
+    ) {
       player.takeDamage();
     }
   }
@@ -263,7 +342,9 @@ export class Zombie {
 
 export interface GameFacilityCallbacks {
   onToast: (msg: string) => void;
-  onGlobalSiren: () => void;
+  onBellStun: (durationMs: number) => void;
+  onStoreFlee: (durationMs: number) => void;
+  onPoliceRest: () => void;
 }
 
 export class GameFacility {
@@ -273,9 +354,10 @@ export class GameFacility {
   radius: number;
   bellState: BellState = "IDLE";
   countdown = 0;
-  marker: L.Marker;
+  marker: L.Marker | L.CircleMarker;
   circle: L.Circle | null;
   readonly id: string;
+  activated = false;
 
   constructor(
     data: NormalizedFacility,
@@ -287,21 +369,26 @@ export class GameFacility {
     this.lat = data.lat;
     this.lng = data.lng;
     this.radius = this.resolveRadius(data.type);
-    this.marker = L.marker([this.lat, this.lng], {
-      icon: createEmojiIcon(this.emojiForType(data.type), this.iconSize()),
-    }).addTo(map);
+    this.marker =
+      data.type === "light" || data.type === "cctv"
+        ? L.circleMarker([this.lat, this.lng], {
+            radius: data.type === "light" ? 3 : 4,
+            color: data.type === "light" ? "#facc15" : "#38bdf8",
+            fillColor: data.type === "light" ? "#fde047" : "#0ea5e9",
+            fillOpacity: 0.85,
+            weight: 1,
+          }).addTo(map)
+        : L.marker([this.lat, this.lng], {
+            icon: createEmojiIcon(this.emojiForType(data.type), this.iconSize()),
+          }).addTo(map);
     if (data.name || data.address) {
       const lines = [data.name, data.address].filter(Boolean).join("<br/>");
       this.marker.bindPopup(lines);
     }
     this.circle =
-      this.type === "police" || this.type === "cctv" || this.type === "light"
-        ? null
-        : this.createCircle();
-    if (this.type === "bell" && this.circle) {
-      this.marker.on("click", () => this.interact(() => null));
-      this.circle.on("click", () => this.interact(() => null));
-    }
+      this.type === "light" || this.type === "bell" || this.type === "cctv"
+        ? this.createCircle()
+        : null;
   }
 
   get latlng(): LatLng {
@@ -310,11 +397,13 @@ export class GameFacility {
 
   private resolveRadius(type: FacilityType): number {
     if (type === "light") return LIGHT_RADIUS_M;
+    if (type === "cctv") return CCTV_RADIUS_M;
     if (type === "police") return POLICE_RADIUS_M;
     return BELL_RADIUS_M;
   }
 
   private emojiForType(type: FacilityType): string {
+    if (type === "store") return "🏪";
     if (type === "light") return "💡";
     if (type === "police") return "🚓";
     if (type === "cctv") return "📹";
@@ -325,10 +414,20 @@ export class GameFacility {
     if (this.type === "police") return 30;
     if (this.type === "cctv") return 22;
     if (this.type === "bell") return 25;
+    if (this.type === "store") return 28;
     return 20;
   }
 
   private createCircle(): L.Circle {
+    if (this.type === "cctv") {
+      return L.circle([this.lat, this.lng], {
+        radius: this.radius,
+        color: "#38bdf8",
+        fillColor: "#0ea5e9",
+        fillOpacity: 0.1,
+        weight: 1,
+      }).addTo(this.map);
+    }
     if (this.type === "light") {
       return L.circle([this.lat, this.lng], {
         radius: this.radius,
@@ -358,11 +457,12 @@ export class GameFacility {
   }
 
   update(dt: number): void {
-    if (this.type !== "bell") return;
+    if (this.type !== "bell" && this.type !== "store") return;
 
     if (this.bellState === "COUNTDOWN") {
       this.countdown -= dt;
       const secs = Math.ceil(this.countdown / 1000);
+      if (!(this.marker instanceof L.Marker)) return;
       this.marker.setIcon(
         L.divIcon({
           className: "custom-div-icon",
@@ -371,20 +471,68 @@ export class GameFacility {
         }),
       );
       if (this.countdown <= 0) {
-        this.callbacks.onGlobalSiren();
+        if (this.type === "bell") {
+          this.callbacks.onBellStun(BELL_STUN_DURATION_MS);
+        } else {
+          this.callbacks.onStoreFlee(STORE_FLEE_DURATION_MS);
+        }
         this.bellState = "COOLDOWN";
         this.countdown = BELL_COOLDOWN_MS;
         this.circle?.setStyle({ color: "gray", fillColor: "gray" });
       }
     } else if (this.bellState === "COOLDOWN") {
       this.countdown -= dt;
-      this.marker.setIcon(createEmojiIcon("⏳", 20));
+      if (this.marker instanceof L.Marker) {
+        this.marker.setIcon(createEmojiIcon("⏳", 20));
+      }
       if (this.countdown <= 0) {
         this.bellState = "IDLE";
         this.circle?.setStyle({ color: "red", fillColor: "#ef4444" });
-        this.marker.setIcon(createEmojiIcon("🚨", 25));
+        if (this.marker instanceof L.Marker) {
+          this.marker.setIcon(
+            createEmojiIcon(this.emojiForType(this.type), this.iconSize()),
+          );
+        }
       }
     }
+  }
+
+  touch(playerPos: LatLng, playing = true): void {
+    if (!playing || haversineDistance(this.latlng, playerPos) > BELL_INTERACT_DISTANCE_M) {
+      return;
+    }
+
+    if (this.type === "police") {
+      if (this.activated) return;
+      this.activated = true;
+      this.circle = this.createCircle();
+      this.callbacks.onPoliceRest();
+      this.callbacks.onToast("경찰 안전구역이 활성화되었습니다. 이곳에서는 무제한으로 쉴 수 있습니다.");
+      return;
+    }
+
+    if (this.type === "store") {
+      if (this.bellState !== "IDLE") return;
+      this.bellState = "COOLDOWN";
+      this.countdown = STORE_COOLDOWN_MS;
+      this.callbacks.onStoreFlee(STORE_FLEE_DURATION_MS);
+      this.callbacks.onToast(
+        "에너지 드링크 획득! 5초 동안 이동 속도가 1.2배가 되고 좀비가 도망갑니다.",
+      );
+      return;
+    }
+
+    if (this.type !== "bell" || this.bellState !== "IDLE") {
+      return;
+    }
+
+    this.bellState = "COUNTDOWN";
+    this.countdown = BELL_COUNTDOWN_MS;
+    this.callbacks.onToast(
+      this.type === "bell"
+        ? "비상벨 감지! 5초 뒤 좀비가 감전됩니다."
+        : "편의점 진입! 5초 뒤 좀비가 반대 방향으로 도망갑니다.",
+    );
   }
 
   interact(getPlayerLatLng: () => LatLng | null, playing = true): void {
@@ -400,7 +548,7 @@ export class GameFacility {
 
     this.bellState = "COUNTDOWN";
     this.countdown = BELL_COUNTDOWN_MS;
-    this.callbacks.onToast("비상벨 작동! 10초 뒤 사이렌이 울립니다.");
+    this.callbacks.onToast("비상벨 감지! 5초 뒤 좀비가 감전됩니다.");
   }
 
   destroy(): void {

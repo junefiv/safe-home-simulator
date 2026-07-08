@@ -26,6 +26,7 @@ export interface FacilitiesLoadReport {
   bell: FacilityTypeLoadInfo;
   cctv: FacilityTypeLoadInfo;
   police: FacilityTypeLoadInfo;
+  store: FacilityTypeLoadInfo;
 }
 
 function isInBbox(f: NormalizedFacility, bbox: Bbox): boolean {

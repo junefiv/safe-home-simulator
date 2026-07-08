@@ -5,6 +5,9 @@ import { fetchCctvFacilities } from "@/lib/public-data/adapters/cctv";
 import { fetchBellFacilities } from "@/lib/public-data/adapters/bell";
 import { fetchLightFacilities } from "@/lib/public-data/adapters/light";
 import { fetchPoliceFacilities } from "@/lib/public-data/adapters/police";
+import { fetchStoreFacilities } from "@/lib/public-data/adapters/store";
+import { getEmergencyBellFacilities } from "@/lib/public-data/emergency-bells";
+import { resolveSafemapServiceKey } from "@/lib/public-data/safemap-key";
 import { ensureMinimumBbox, filterByBbox } from "@/lib/public-data/bbox-filter";
 import {
   buildTypeLoadInfo,
@@ -81,7 +84,7 @@ export async function GET(request: NextRequest) {
   let cctvError: string | undefined;
   const lightSource =
     nationwideLights.length > 0 ? "bundled-json" : "empty";
-  const cctvSource = nationwideCctv.length > 0 ? "bundled-json" : "empty";
+  const resolvedCctvSource = nationwideCctv.length > 0 ? "csv-cache" : "empty";
 
   if (nationwideLights.length === 0) {
     lightError = `security-lights.json 비어 있음. ${BUILD_HINT}`;
@@ -110,6 +113,20 @@ export async function GET(request: NextRequest) {
     bellFacilities = filterByBbox(bellFacilities, gameBbox);
   }
 
+  if (!useMock) {
+    bellFacilities = filterByBbox(await getEmergencyBellFacilities(), gameBbox);
+    bellSource = bellFacilities.length > 0 ? "csv-cache" : "none";
+    bellError = bellFacilities.length > 0 ? undefined : "현재 구간에 안전비상벨이 없습니다.";
+  }
+
+  let storeFacilities: NormalizedFacility[] = [];
+  let storeError: string | undefined;
+  try {
+    storeFacilities = await fetchStoreFacilities(resolveSafemapServiceKey(), gameBbox);
+  } catch (err) {
+    storeError = err instanceof Error ? err.message : "편의점 로딩 실패";
+  }
+
   let policeFacilities: NormalizedFacility[] = [];
   let policeError: string | undefined;
   let policeSource = "none";
@@ -121,6 +138,7 @@ export async function GET(request: NextRequest) {
     try {
       const policeResult = await fetchPoliceFacilities(odcloudKey, process.env.POLICE_API_URL);
       policeFacilities = policeResult.facilities;
+      policeFacilities = filterByBbox(policeFacilities, gameBbox);
       policeSource = policeResult.source;
       if (policeFacilities.length === 0) {
         policeError = "파출소 목록이 비어 있습니다. 키·캐시를 확인해주세요.";
@@ -138,6 +156,7 @@ export async function GET(request: NextRequest) {
     ...filterByBbox(nationwideLights, gameBbox),
     ...filterByBbox(nationwideCctv, gameBbox),
     ...policeFacilities,
+    ...storeFacilities,
   ];
 
   const report: FacilitiesLoadReport = {
@@ -146,8 +165,21 @@ export async function GET(request: NextRequest) {
     bbox: gameBbox,
     light: buildTypeLoadInfo(nationwideLights, gameBbox, lightSource, false, lightError),
     bell: buildTypeLoadInfo(bellFacilities, gameBbox, bellSource, bellIsMock, bellError),
-    cctv: buildTypeLoadInfo(nationwideCctv, gameBbox, cctvSource, false, cctvError),
+    cctv: buildTypeLoadInfo(
+      nationwideCctv,
+      gameBbox,
+      resolvedCctvSource,
+      false,
+      cctvError,
+    ),
     police: buildTypeLoadInfo(policeFacilities, gameBbox, policeSource, false, policeError),
+    store: buildTypeLoadInfo(
+      storeFacilities,
+      gameBbox,
+      storeFacilities.length > 0 ? "api-wfs" : "none",
+      false,
+      storeError,
+    ),
   };
 
   logFacilitiesLoadReport(report);

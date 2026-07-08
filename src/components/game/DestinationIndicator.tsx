@@ -73,7 +73,12 @@ export function DestinationIndicator({
         style={{ transform: `rotate(${indicator.angleDeg}deg)` }}
       >
         <span className="destination-indicator-chevron">▲</span>
-        <span className="destination-indicator-icon">🏠</span>
+        <span
+          className="destination-indicator-icon"
+          style={{ transform: `rotate(${-indicator.angleDeg}deg)` }}
+        >
+          🏠
+        </span>
       </div>
       <div className="destination-indicator-label">
         집

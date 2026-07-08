@@ -11,6 +11,7 @@ import {
   VWORLD_MAP_ZOOM,
   PLAYER_MAX_HP,
   ROADS_BOUNDS_PADDING,
+  STORE_PLAYER_SPEED_MULTIPLIER,
 } from "@/lib/game/constants";
 import { wrapPolygons, type BlockPolygon } from "@/lib/game/blockPolygon";
 import {
@@ -19,14 +20,14 @@ import {
   Zombie,
   createEmojiIcon,
   createHomeIcon,
-  triggerGlobalSirenState,
 } from "@/lib/game/entities";
 import { updateGameLoop } from "@/lib/game/gameLoop";
 import {
   collectSurroundingPolygons,
   createViewportGrid,
   getPlayerGridCell,
-  getSurroundBbox,
+  getSurroundingCells,
+  gridCellToBbox,
   isSameCell,
   pruneTileStore,
   sleep,
@@ -35,16 +36,20 @@ import {
 } from "@/lib/game/viewportTiles";
 import { cellStorageKey } from "@/lib/game/blockPolygon";
 import {
+  createMovementResolver,
   createPositionValidator,
   getNearestValidPoint,
+  type MovementResolver,
 } from "@/lib/game/roadValidation";
 import {
   INITIAL_INPUT_STATE,
   type GameState,
+  type Bbox,
   type GeocodeResult,
   type InputState,
   type JoystickVector,
   type LatLng,
+  type MovementLayer,
   type RoadsData,
 } from "@/lib/game/types";
 import { DestinationIndicator } from "./DestinationIndicator";
@@ -77,12 +82,26 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const playerRef = useRef<Player | null>(null);
   const zombiesRef = useRef<Zombie[]>([]);
   const facilitiesRef = useRef<GameFacility[]>([]);
-  const roadsRef = useRef<RoadsData>({ walkLines: [], walkPolygons: [], blockPolygons: [] });
+  const roadsRef = useRef<RoadsData>({
+    walkLines: [],
+    subwayLines: [],
+    walkPolygons: [],
+    stationPolygons: [],
+    apartmentPolygons: [],
+    blockPolygons: [],
+    buildingCoverage: [],
+  });
+  const movementRef = useRef<MovementResolver | null>(null);
   const keysRef = useRef<InputState>({ ...INITIAL_INPUT_STATE });
   const joystickRef = useRef<JoystickVector>({ x: 0, y: 0 });
   const loopRef = useRef<number | null>(null);
   const lastTimeRef = useRef(0);
   const globalSirenRef = useRef({ active: false, timer: 0 });
+  const globalStunRef = useRef({ active: false, timer: 0 });
+  const pendingSirenRef = useRef(0);
+  const pendingStunRef = useRef(0);
+  const playerBoostTimerRef = useRef(0);
+  const pendingPlayerBoostRef = useRef(0);
   const zombieSpawnTimerRef = useRef(0);
   const buildingFetchRef = useRef({
     grid: null as ViewportGrid | null,
@@ -90,6 +109,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
     loadedCells: new Set<string>(),
     loadingKeys: new Set<string>(),
     retryCounts: new Map<string, number>(),
+    coverageStore: new Map<string, Bbox>(),
     inflight: 0,
     lastCell: null as GridCell | null,
     lastCheckMs: 0,
@@ -106,6 +126,9 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const [showHud, setShowHud] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
   const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
+  const [movementLayer, setMovementLayer] = useState<MovementLayer>("surface");
+  const [zombieCount, setZombieCount] = useState(0);
+  const [mapDataLoading, setMapDataLoading] = useState(false);
 
   const endRef = useRef<LatLng | null>(null);
   const [destination, setDestination] = useState<LatLng | null>(null);
@@ -115,7 +138,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const cleanupEntities = useCallback(() => {
     const map = mapRef.current;
     if (map) {
-      playerRef.current?.marker && map.removeLayer(playerRef.current.marker);
+      if (playerRef.current?.marker) map.removeLayer(playerRef.current.marker);
       zombiesRef.current.forEach((z) => z.destroy(map));
       facilitiesRef.current.forEach((f) => f.destroy());
       startMarkersRef.current.forEach((m) => map.removeLayer(m));
@@ -125,17 +148,24 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
     facilitiesRef.current = [];
     startMarkersRef.current = [];
     zombieSpawnTimerRef.current = 0;
+    movementRef.current = null;
     buildingFetchRef.current = {
       grid: null,
       tileStore: new Map(),
       loadedCells: new Set(),
       loadingKeys: new Set(),
       retryCounts: new Map(),
+      coverageStore: new Map(),
       inflight: 0,
       lastCell: null,
       lastCheckMs: 0,
     };
     globalSirenRef.current = { active: false, timer: 0 };
+    globalStunRef.current = { active: false, timer: 0 };
+    pendingSirenRef.current = 0;
+    pendingStunRef.current = 0;
+    playerBoostTimerRef.current = 0;
+    pendingPlayerBoostRef.current = 0;
   }, []);
 
   const endGame = useCallback(
@@ -174,9 +204,13 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       if (Math.abs(row - cell.row) > 2 || Math.abs(col - cell.col) > 2) {
         state.loadedCells.delete(key);
         state.retryCounts.delete(key);
+        state.coverageStore.delete(key);
       }
     }
     roadsRef.current.blockPolygons = collectSurroundingPolygons(cell, state.tileStore);
+    roadsRef.current.buildingCoverage = getSurroundingCells(cell)
+      .map((nearby) => state.coverageStore.get(cellStorageKey(nearby.row, nearby.col)))
+      .filter((bbox): bbox is Bbox => Boolean(bbox));
   }, []);
 
   const loadBuildingCell = useCallback(
@@ -196,24 +230,29 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       state.loadingKeys.add(key);
       state.inflight += 1;
+      setMapDataLoading(true);
 
       let success = false;
       try {
-        const bbox = getSurroundBbox(cell, state.grid);
+        const rawBbox = gridCellToBbox(cell, state.grid);
+        const latPad = (rawBbox.north - rawBbox.south) * 0.12;
+        const lngPad = (rawBbox.east - rawBbox.west) * 0.12;
+        const bbox = {
+          south: rawBbox.south - latPad,
+          north: rawBbox.north + latPad,
+          west: rawBbox.west - lngPad,
+          east: rawBbox.east + lngPad,
+        };
         const raw = await fetchBuildings(bbox);
         const wrapped = wrapPolygons(raw);
 
-        if (wrapped.length > 0) {
-          state.tileStore.set(key, wrapped);
-          state.loadedCells.add(key);
-          state.retryCounts.delete(key);
-          success = true;
-          if (state.lastCell) {
-            syncActiveBlockPolygons(state.lastCell);
-          }
-        } else {
-          const retries = (state.retryCounts.get(key) ?? 0) + 1;
-          state.retryCounts.set(key, retries);
+        state.tileStore.set(key, wrapped);
+        state.coverageStore.set(key, bbox);
+        state.loadedCells.add(key);
+        state.retryCounts.delete(key);
+        success = true;
+        if (state.lastCell) {
+          syncActiveBlockPolygons(state.lastCell);
         }
       } catch {
         const retries = (state.retryCounts.get(key) ?? 0) + 1;
@@ -221,6 +260,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       } finally {
         state.loadingKeys.delete(key);
         state.inflight -= 1;
+        if (state.inflight === 0) setMapDataLoading(false);
       }
 
       return success;
@@ -260,6 +300,24 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       if (needsLoad || (cellChanged && retries > 0 && retries < BUILDING_MAX_RETRIES)) {
         void loadBuildingCell(cell);
       }
+
+      if (cellChanged) {
+        const neighbors = [
+          { row: cell.row - 1, col: cell.col },
+          { row: cell.row + 1, col: cell.col },
+          { row: cell.row, col: cell.col - 1 },
+          { row: cell.row, col: cell.col + 1 },
+        ];
+        const prefetch = () => {
+          for (const neighbor of neighbors) void loadBuildingCell(neighbor);
+        };
+        const requestIdle = window.requestIdleCallback;
+        if (typeof requestIdle === "function") {
+          requestIdle(prefetch, { timeout: 1200 });
+        } else {
+          globalThis.setTimeout(prefetch, 250);
+        }
+      }
     },
     [loadBuildingCell, syncActiveBlockPolygons],
   );
@@ -285,18 +343,26 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         [startLatLng.lat, startLatLng.lng],
         [endLatLng.lat, endLatLng.lng],
       );
-      const routeBounds = bounds.pad(ROADS_BOUNDS_PADDING);
-      const viewBounds = map.getBounds().pad(0.15);
-      const padded = routeBounds.extend(viewBounds);
+      const padded = bounds.pad(ROADS_BOUNDS_PADDING);
       const roadsBbox = {
         south: padded.getSouth(),
         west: padded.getWest(),
         north: padded.getNorth(),
         east: padded.getEast(),
       };
+      const facilityBbox = expandBbox(
+        startLatLng,
+        endLatLng,
+        FACILITIES_BBOX_PADDING,
+      );
+      const facilityPromise = fetchFacilities(facilityBbox).then(
+        (result) => ({ result, error: null as unknown }),
+        (error: unknown) => ({ result: null, error }),
+      );
 
       try {
         roadsRef.current = await fetchRoads(roadsBbox);
+        movementRef.current = createMovementResolver(roadsRef.current);
         if (roadsRef.current.walkLines.length === 0) {
           setToast("이동 가능한 도로 데이터가 없습니다. 다시 시도해주세요.");
           setLoading(false);
@@ -311,10 +377,11 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       }
 
       setLoadingLabel("시설물·전국 파출소 로딩 중...");
-      const facilityBbox = expandBbox(startLatLng, endLatLng, FACILITIES_BBOX_PADDING);
       let facilityData: import("@/lib/game/types").NormalizedFacility[] = [];
       try {
-        const facilityResult = await fetchFacilities(facilityBbox);
+        const facilityLoad = await facilityPromise;
+        if (facilityLoad.error || !facilityLoad.result) throw facilityLoad.error;
+        const facilityResult = facilityLoad.result;
         facilityData = facilityResult.facilities;
         if (facilityResult.loadReport?.light.error) {
           setToast(facilityResult.loadReport.light.error);
@@ -386,9 +453,16 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       const facilityCallbacks = {
         onToast: (msg: string) => setToast(msg),
-        onGlobalSiren: () => {
-          const siren = triggerGlobalSirenState();
-          globalSirenRef.current = siren;
+        onBellStun: (durationMs: number) => {
+          pendingStunRef.current = Math.max(pendingStunRef.current, durationMs);
+          setSirenActive(true);
+        },
+        onStoreFlee: (durationMs: number) => {
+          pendingSirenRef.current = Math.max(pendingSirenRef.current, durationMs);
+          pendingPlayerBoostRef.current = Math.max(
+            pendingPlayerBoostRef.current,
+            durationMs,
+          );
           setSirenActive(true);
           if (!sirenOverlayRef.current) {
             const overlay = document.createElement("div");
@@ -398,6 +472,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
             sirenOverlayRef.current = overlay;
           }
         },
+        onPoliceRest: () => playerRef.current?.heal(1),
       };
 
       facilitiesRef.current = facilityData.map(
@@ -406,16 +481,6 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
             ...facilityCallbacks,
           }),
       );
-
-      facilitiesRef.current.forEach((f) => {
-        if (f.type !== "bell" || !f.circle) return;
-        f.marker.off("click");
-        f.circle.off("click");
-        const interact = () =>
-          f.interact(() => playerRef.current?.latlng ?? null, gameState === "PLAYING");
-        f.marker.on("click", interact);
-        f.circle.on("click", interact);
-      });
 
       playerRef.current = new Player(startPt.lat, startPt.lng, map, {
         onDamage: () => setToast("좀비에게 공격당했습니다!"),
@@ -426,6 +491,8 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       });
 
       setHp(PLAYER_MAX_HP);
+      setMovementLayer("surface");
+      setZombieCount(0);
       setGameState("PLAYING");
       setShowHud(true);
       setShowJoystick(window.innerWidth <= 768);
@@ -433,10 +500,17 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       lastTimeRef.current = performance.now();
       const tick = (timestamp: number) => {
-        if (!playerRef.current || !endRef.current || !mapRef.current) return;
+        if (
+          !playerRef.current ||
+          !endRef.current ||
+          !mapRef.current ||
+          !movementRef.current
+        ) return;
 
-        const dt = timestamp - lastTimeRef.current;
+        // 긴 프레임 뒤 한 번에 크게 이동해 건물을 관통하지 않도록 보정한다.
+        const dt = Math.min(timestamp - lastTimeRef.current, 50);
         lastTimeRef.current = timestamp;
+        playerBoostTimerRef.current = Math.max(0, playerBoostTimerRef.current - dt);
 
         const result = updateGameLoop({
           dt,
@@ -447,31 +521,51 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
           zombies: zombiesRef.current,
           facilities: facilitiesRef.current,
           walkLines: roadsRef.current.walkLines,
-          walkPolygons: roadsRef.current.walkPolygons,
-          blockPolygons: roadsRef.current.blockPolygons,
+          subwayLines: roadsRef.current.subwayLines,
+          movement: movementRef.current,
+          playerSpeedMultiplier:
+            playerBoostTimerRef.current > 0 ? STORE_PLAYER_SPEED_MULTIPLIER : 1,
           endLatLng: endRef.current,
           map: mapRef.current,
           globalSirenActive: globalSirenRef.current.active,
           globalSirenTimer: globalSirenRef.current.timer,
+          globalStunActive: globalStunRef.current.active,
+          globalStunTimer: globalStunRef.current.timer,
           zombieSpawnTimer: zombieSpawnTimerRef.current,
         });
 
         zombiesRef.current = result.zombies;
-        globalSirenRef.current = {
-          active: result.globalSirenActive,
-          timer: result.globalSirenTimer,
-        };
+        globalSirenRef.current = pendingSirenRef.current > 0
+          ? { active: true, timer: pendingSirenRef.current }
+          : { active: result.globalSirenActive, timer: result.globalSirenTimer };
+        globalStunRef.current = pendingStunRef.current > 0
+          ? { active: true, timer: pendingStunRef.current }
+          : { active: result.globalStunActive, timer: result.globalStunTimer };
+        pendingSirenRef.current = 0;
+        pendingStunRef.current = 0;
+        if (pendingPlayerBoostRef.current > 0) {
+          playerBoostTimerRef.current = pendingPlayerBoostRef.current;
+        }
+        pendingPlayerBoostRef.current = 0;
         zombieSpawnTimerRef.current = result.zombieSpawnTimer;
 
         if (timestamp - lastHudUpdateRef.current > 200) {
           lastHudUpdateRef.current = timestamp;
           setDistToHome(result.distToHome);
-          setSirenActive(result.globalSirenActive);
+          setSirenActive(
+            globalSirenRef.current.active || globalStunRef.current.active,
+          );
+          setMovementLayer(playerRef.current.movementLayer);
+          setZombieCount(result.zombies.length);
         }
 
         scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
 
-        if (!result.globalSirenActive && sirenOverlayRef.current) {
+        if (
+          !globalSirenRef.current.active &&
+          !globalStunRef.current.active &&
+          sirenOverlayRef.current
+        ) {
           sirenOverlayRef.current.remove();
           sirenOverlayRef.current = null;
         }
@@ -486,7 +580,14 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       loopRef.current = requestAnimationFrame(tick);
     },
-    [cleanupEntities, endGame, gameState, loadBuildingCell, syncActiveBlockPolygons],
+    [
+      cleanupEntities,
+      endGame,
+      googleMapsApiKey,
+      loadBuildingCell,
+      scheduleViewportBuildingTiles,
+      syncActiveBlockPolygons,
+    ],
   );
 
   useEffect(() => {
@@ -539,7 +640,15 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       />
       <Toast message={toast} onClear={() => setToast(null)} />
       {showHud && (
-        <HUD hp={hp} maxHp={PLAYER_MAX_HP} distToHome={distToHome} sirenActive={sirenActive} />
+        <HUD
+          hp={hp}
+          maxHp={PLAYER_MAX_HP}
+          distToHome={distToHome}
+          sirenActive={sirenActive}
+          movementLayer={movementLayer}
+          zombieCount={zombieCount}
+          mapDataLoading={mapDataLoading}
+        />
       )}
       <DestinationIndicator
         map={mapInstance}

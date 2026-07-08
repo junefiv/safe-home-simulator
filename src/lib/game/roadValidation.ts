@@ -4,10 +4,10 @@ import {
   ROAD_BRIDGE_MAX_M,
   ROAD_JUNCTION_SLACK_M,
   ROAD_SEGMENT_TOLERANCE_M,
-  ROAD_STRICT_ENDPOINT_SLACK_M,
+  WALKABLE_HIGHWAY_TYPES,
 } from "./constants";
 import { haversineDistance } from "./geo";
-import type { LatLng, RoadsData, WalkLine } from "./types";
+import type { LatLng, MovementLayer, RoadsData, WalkLine } from "./types";
 
 export function isInsidePolygon(point: LatLng, polygon: LatLng[]): boolean {
   const x = point.lng;
@@ -49,7 +49,7 @@ export function distanceToSegment(p: LatLng, v: LatLng, w: LatLng): number {
 }
 
 export function isWalkableHighway(highway: string | undefined): boolean {
-  return Boolean(highway);
+  return Boolean(highway && WALKABLE_HIGHWAY_TYPES.has(highway));
 }
 
 /** VWorld 노란 대로 — 건물 폴리곤과 겹쳐도 통행 허용 */
@@ -89,7 +89,7 @@ function matchWalkRoadOnLines(
   const includeBridges = options.includeBridges ?? true;
   const endpointSlackM = options.endpointSlackM ?? ROAD_JUNCTION_SLACK_M;
 
-  for (const line of walkLines) {
+  for (const line of nearbyWalkLines(lat, lng, walkLines)) {
     if (!includeBridges && line.isBridge) continue;
 
     if (lat < line.minLat || lat > line.maxLat || lng < line.minLng || lng > line.maxLng) {
@@ -180,15 +180,102 @@ function isInsideBlockPolygon(pt: LatLng, block: BlockPolygon): boolean {
   return isInsidePolygon(pt, block.points);
 }
 
-function isInsideStationZone(pt: LatLng, walkPolygons: LatLng[][]): boolean {
+function isInsideWalkableZone(pt: LatLng, walkPolygons: LatLng[][]): boolean {
   for (const poly of walkPolygons) {
     if (isInsidePolygon(pt, poly)) return true;
   }
   return false;
 }
 
-function isInsideAnyBuilding(pt: LatLng, blockPolygons: BlockPolygon[]): boolean {
+const ROAD_INDEX_CELL_DEG = 0.001;
+const roadIndexCache = new WeakMap<WalkLine[], Map<string, WalkLine[]>>();
+
+function getRoadIndex(walkLines: WalkLine[]): Map<string, WalkLine[]> {
+  const cached = roadIndexCache.get(walkLines);
+  if (cached) return cached;
+
+  const index = new Map<string, WalkLine[]>();
+  for (const line of walkLines) {
+    const minRow = Math.floor(line.minLat / ROAD_INDEX_CELL_DEG);
+    const maxRow = Math.floor(line.maxLat / ROAD_INDEX_CELL_DEG);
+    const minCol = Math.floor(line.minLng / ROAD_INDEX_CELL_DEG);
+    const maxCol = Math.floor(line.maxLng / ROAD_INDEX_CELL_DEG);
+    for (let row = minRow; row <= maxRow; row += 1) {
+      for (let col = minCol; col <= maxCol; col += 1) {
+        const key = `${row}:${col}`;
+        const bucket = index.get(key);
+        if (bucket) bucket.push(line);
+        else index.set(key, [line]);
+      }
+    }
+  }
+  roadIndexCache.set(walkLines, index);
+  return index;
+}
+
+function nearbyWalkLines(lat: number, lng: number, walkLines: WalkLine[]): WalkLine[] {
+  const key = `${Math.floor(lat / ROAD_INDEX_CELL_DEG)}:${Math.floor(lng / ROAD_INDEX_CELL_DEG)}`;
+  return getRoadIndex(walkLines).get(key) ?? [];
+}
+
+const ALLEY_HIGHWAYS = new Set([
+  "service",
+  "living_street",
+  "residential",
+  "unclassified",
+  "footway",
+  "path",
+  "pedestrian",
+  "steps",
+  "track",
+]);
+
+function isOnMappedAlleyCenterline(point: LatLng, walkLines: WalkLine[]): boolean {
+  return nearbyWalkLines(point.lat, point.lng, walkLines).some(
+    (line) =>
+      !line.isBridge &&
+      Boolean(line.highway && ALLEY_HIGHWAYS.has(line.highway)) &&
+      distanceToSegment(point, line.p1, line.p2) <= 1.8,
+  );
+}
+
+function isInsideAnyZone(pt: LatLng, polygons: LatLng[][]): boolean {
+  return polygons.some((polygon) => isInsidePolygon(pt, polygon));
+}
+
+const BLOCK_INDEX_CELL_DEG = 0.001;
+const blockIndexCache = new WeakMap<BlockPolygon[], Map<string, BlockPolygon[]>>();
+
+function blockCellKey(lat: number, lng: number): string {
+  return `${Math.floor(lat / BLOCK_INDEX_CELL_DEG)}:${Math.floor(lng / BLOCK_INDEX_CELL_DEG)}`;
+}
+
+function getBlockIndex(blockPolygons: BlockPolygon[]): Map<string, BlockPolygon[]> {
+  const cached = blockIndexCache.get(blockPolygons);
+  if (cached) return cached;
+
+  const index = new Map<string, BlockPolygon[]>();
   for (const block of blockPolygons) {
+    const minRow = Math.floor(block.minLat / BLOCK_INDEX_CELL_DEG);
+    const maxRow = Math.floor(block.maxLat / BLOCK_INDEX_CELL_DEG);
+    const minCol = Math.floor(block.minLng / BLOCK_INDEX_CELL_DEG);
+    const maxCol = Math.floor(block.maxLng / BLOCK_INDEX_CELL_DEG);
+    for (let row = minRow; row <= maxRow; row += 1) {
+      for (let col = minCol; col <= maxCol; col += 1) {
+        const key = `${row}:${col}`;
+        const bucket = index.get(key);
+        if (bucket) bucket.push(block);
+        else index.set(key, [block]);
+      }
+    }
+  }
+  blockIndexCache.set(blockPolygons, index);
+  return index;
+}
+
+function isInsideAnyBuilding(pt: LatLng, blockPolygons: BlockPolygon[]): boolean {
+  const nearby = getBlockIndex(blockPolygons).get(blockCellKey(pt.lat, pt.lng)) ?? [];
+  for (const block of nearby) {
     if (isInsideBlockPolygon(pt, block)) return true;
   }
   return false;
@@ -290,6 +377,75 @@ export function createPositionValidator(roads: RoadsData) {
     isValidPosition(lat, lng, walkLines, walkPolygons, blockPolygons);
 }
 
+export interface MovementResolver {
+  isValid(point: LatLng, layer: MovementLayer): boolean;
+  canMove(current: LatLng, next: LatLng, layer: MovementLayer): boolean;
+  resolveLayer(current: LatLng, next: LatLng, layer: MovementLayer): MovementLayer;
+}
+
+function oppositeLayer(layer: MovementLayer): MovementLayer {
+  return layer === "surface" ? "underground" : "surface";
+}
+
+export function createMovementResolver(roads: RoadsData): MovementResolver {
+  const isStation = (point: LatLng) =>
+    isInsideAnyZone(point, roads.stationPolygons ?? []);
+
+  const isValid = (point: LatLng, layer: MovementLayer): boolean => {
+    if (isStation(point)) return true;
+
+    if (layer === "underground") {
+      return matchWalkRoadOnLines(
+        point,
+        point.lat,
+        point.lng,
+        roads.subwayLines ?? [],
+      ).onRoad;
+    }
+
+    const coverage = roads.buildingCoverage;
+    if (
+      coverage &&
+      !coverage.some(
+        (bbox) =>
+          point.lat >= bbox.south &&
+          point.lat <= bbox.north &&
+          point.lng >= bbox.west &&
+          point.lng <= bbox.east,
+      )
+    ) {
+      return false;
+    }
+
+    if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) {
+      // 좁은 골목은 건물 경계 데이터가 수 m 겹치는 경우가 있어 중심선만 통과시킨다.
+      return isOnMappedAlleyCenterline(point, roads.walkLines);
+    }
+    if (isInsideAnyZone(point, roads.apartmentPolygons ?? roads.walkPolygons ?? [])) {
+      return true;
+    }
+    return matchWalkRoadOnLines(
+      point,
+      point.lat,
+      point.lng,
+      roads.walkLines,
+    ).onRoad;
+  };
+
+  return {
+    isValid,
+    canMove(current, next, layer) {
+      if (isValid(next, layer)) return true;
+      return isStation(current) && isValid(next, oppositeLayer(layer));
+    },
+    resolveLayer(current, next, layer) {
+      if (isValid(next, layer)) return layer;
+      const other = oppositeLayer(layer);
+      return isStation(current) && isValid(next, other) ? other : layer;
+    },
+  };
+}
+
 export function isValidPosition(
   lat: number,
   lng: number,
@@ -301,18 +457,13 @@ export function isValidPosition(
 
   const pt: LatLng = { lat, lng };
 
-  // 지하철역·기차역 구역은 건물과 무관하게 통과
-  if (isInsideStationZone(pt, walkPolygons)) return true;
-
   const insideBuilding = isInsideAnyBuilding(pt, blockPolygons);
 
-  // 건물 안: OSM 도로 중심선 위만 통과 (보조 bridge·넓은 여유 미적용)
-  if (insideBuilding) {
-    return matchWalkRoadOnLines(pt, lat, lng, walkLines, {
-      includeBridges: false,
-      endpointSlackM: ROAD_STRICT_ENDPOINT_SLACK_M,
-    }).onRoad;
-  }
+  // 도로 폭 보정이나 보조 연결선이 건물과 겹쳐도 건물 내부는 통과하지 않는다.
+  if (insideBuilding) return false;
+
+  // 역과 아파트 단지의 건물 밖 공간은 이동할 수 있다.
+  if (isInsideWalkableZone(pt, walkPolygons)) return true;
 
   // 건물 밖: 도로 + 교차로 연결(bridge) 허용
   return matchWalkRoadOnLines(pt, lat, lng, walkLines, {
@@ -462,6 +613,8 @@ export { ZOMBIE_PROBE_ANGLES };
 
 interface OverpassElement {
   type?: string;
+  lat?: number;
+  lon?: number;
   geometry?: { lat: number; lon: number }[];
   tags?: Record<string, string>;
 }
@@ -478,13 +631,27 @@ function isStationElement(el: OverpassElement): boolean {
   );
 }
 
-/** 역사·문화재 건물은 통과 허용 */
-function isHistoricBuilding(tags?: Record<string, string>): boolean {
-  if (!tags) return false;
-  if (tags.historic) return true;
-  if (tags.heritage) return true;
-  if (tags.building === "historic") return true;
-  return false;
+function isApartmentComplexElement(el: OverpassElement): boolean {
+  const tags = el.tags;
+  if (!tags || tags.landuse !== "residential") return false;
+
+  const residential = tags.residential?.toLowerCase();
+  if (residential === "apartments" || residential === "apartment") return true;
+
+  const label = `${tags.name ?? ""} ${tags["name:ko"] ?? ""}`.toLowerCase();
+  return /아파트|\bapt\.?\b|\bapartments?\b/.test(label);
+}
+
+function isUndergroundSubwayElement(el: OverpassElement): boolean {
+  const tags = el.tags;
+  if (!tags || tags.railway !== "subway") return false;
+  const layer = Number(tags.layer ?? "0");
+  return !(
+    tags.bridge === "yes" ||
+    tags.embankment === "yes" ||
+    tags.location === "overground" ||
+    layer > 0
+  );
 }
 
 function isBlockingBuilding(el: OverpassElement): boolean {
@@ -494,8 +661,6 @@ function isBlockingBuilding(el: OverpassElement): boolean {
   const tags = el.tags;
   if (!tags) return false;
   if (tags.building === "no") return false;
-  if (isHistoricBuilding(tags)) return false;
-
   if (tags.building && tags.building !== "no") return true;
   if (el.type === "relation" && tags.type === "building") return true;
 
@@ -504,6 +669,19 @@ function isBlockingBuilding(el: OverpassElement): boolean {
 
 function geometryToPolygon(geometry: { lat: number; lon: number }[]): LatLng[] {
   return geometry.map((pt) => ({ lat: pt.lat, lng: pt.lon }));
+}
+
+function circlePolygon(lat: number, lng: number, radiusM = 24): LatLng[] {
+  return Array.from({ length: 16 }, (_, index) => {
+    const angle = (index / 16) * Math.PI * 2;
+    return {
+      lat: lat + (Math.sin(angle) * radiusM) / 111111,
+      lng:
+        lng +
+        (Math.cos(angle) * radiusM) /
+          (111111 * Math.cos((lat * Math.PI) / 180)),
+    };
+  });
 }
 
 export function mergeBlockPolygons(
@@ -529,13 +707,39 @@ export function parseOverpassBuildings(elements: OverpassElement[]): LatLng[][] 
 
 export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
   const walkLines: WalkLine[] = [];
-  const walkPolygons: LatLng[][] = [];
+  const subwayLines: WalkLine[] = [];
+  const stationPolygons: LatLng[][] = [];
+  const apartmentPolygons: LatLng[][] = [];
 
   for (const el of elements) {
+    if (isStationElement(el) && el.lat !== undefined && el.lon !== undefined) {
+      stationPolygons.push(circlePolygon(el.lat, el.lon));
+      continue;
+    }
+
     if (!el.geometry) continue;
 
     if (isStationElement(el) && el.geometry.length > 2) {
-      walkPolygons.push(geometryToPolygon(el.geometry));
+      stationPolygons.push(geometryToPolygon(el.geometry));
+      continue;
+    }
+
+    if (isApartmentComplexElement(el) && el.geometry.length > 2) {
+      apartmentPolygons.push(geometryToPolygon(el.geometry));
+      continue;
+    }
+
+    if (isUndergroundSubwayElement(el)) {
+      for (let i = 0; i < el.geometry.length - 1; i++) {
+        subwayLines.push(
+          makeWalkLine(
+            { lat: el.geometry[i].lat, lng: el.geometry[i].lon },
+            { lat: el.geometry[i + 1].lat, lng: el.geometry[i + 1].lon },
+            8,
+            "subway",
+          ),
+        );
+      }
       continue;
     }
 
@@ -560,5 +764,14 @@ export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {
 
   const bridged = bridgeRoadGaps(walkLines);
 
-  return { walkLines: bridged, walkPolygons, blockPolygons: [] };
+  const walkPolygons = [...stationPolygons, ...apartmentPolygons];
+  return {
+    walkLines: bridged,
+    subwayLines,
+    walkPolygons,
+    stationPolygons,
+    apartmentPolygons,
+    blockPolygons: [],
+    buildingCoverage: [],
+  };
 }

@@ -77,7 +77,6 @@ export function featuresToBlockPolygons(features: GeoJsonFeature[]): LatLng[][] 
 
   for (const feature of features) {
     if (!feature.geometry) continue;
-    if (isHistoricVworldBuilding(feature.properties)) continue;
     if (isStationVworldBuilding(feature.properties)) continue;
     polygons.push(...geometryToBlockPolygons(feature.geometry));
   }

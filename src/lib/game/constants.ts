@@ -4,11 +4,11 @@ export const PLAYER_INVULNERABLE_MS = 2000;
 
 export const ZOMBIE_BASE_SPEED_MPS = 6;
 export const ZOMBIE_FLEE_SPEED_MULTIPLIER = 1.5;
-export const ZOMBIE_MAX_COUNT = 25;
-export const ZOMBIE_SPAWN_INTERVAL_MS = 3000;
+export const ZOMBIE_MAX_COUNT = 12;
+export const ZOMBIE_SPAWN_INTERVAL_MS = 4500;
 export const ZOMBIE_SPAWN_MIN_DISTANCE_M = 80;
 export const ZOMBIE_SPAWN_MAX_DISTANCE_M = 150;
-export const ZOMBIE_COLLISION_DISTANCE_M = 10;
+export const ZOMBIE_COLLISION_DISTANCE_M = 3;
 
 export const WIN_DISTANCE_M = 20;
 /** 도로 중심선 허용 반경 기본값(미터) */
@@ -48,14 +48,6 @@ export const WALKABLE_HIGHWAY_TYPES = new Set([
   "steps",
   "cycleway",
   "bridleway",
-  // 기타
-  "construction",
-  "proposed",
-  "platform",
-  "raceway",
-  "corridor",
-  "elevator",
-  "escalator",
 ]);
 export const ROADS_BOUNDS_PADDING = 0.25;
 /** 게임 중 고정 지도 줌 (Google roadmap 건물 윤곽은 17+에서 표시) */
@@ -67,16 +59,21 @@ export const BUILDING_LOOKAHEAD_RATIO = 1.0;
 /** 건물 타일 재검사 간격(ms) */
 export const BUILDING_TILE_CHECK_MS = 500;
 /** 동시 건물 로드 수 */
-export const BUILDING_MAX_CONCURRENT = 2;
+export const BUILDING_MAX_CONCURRENT = 1;
 
 export const LIGHT_RADIUS_M = 20;
-export const POLICE_RADIUS_M = 40;
+export const CCTV_RADIUS_M = 15;
+export const POLICE_RADIUS_M = 15;
 export const BELL_RADIUS_M = 10;
-export const BELL_INTERACT_DISTANCE_M = 30;
-export const BELL_COUNTDOWN_MS = 10000;
-export const BELL_COOLDOWN_MS = 20000;
-export const GLOBAL_SIREN_DURATION_MS = 5000;
-export const LIGHT_SLOW_FACTOR = 0.4;
+export const BELL_INTERACT_DISTANCE_M = 4;
+export const BELL_COUNTDOWN_MS = 5000;
+export const BELL_COOLDOWN_MS = 30000;
+export const BELL_STUN_DURATION_MS = 5000;
+export const STORE_FLEE_DURATION_MS = 5000;
+export const STORE_COOLDOWN_MS = 60000;
+export const STORE_PLAYER_SPEED_MULTIPLIER = 1.2;
+export const GLOBAL_SIREN_DURATION_MS = STORE_FLEE_DURATION_MS;
+export const LIGHT_SLOW_FACTOR = 0.9;
 
 export const FACILITIES_BBOX_PADDING = 0.15;
 export const FACILITIES_CACHE_TTL_MS = 5 * 60 * 1000;

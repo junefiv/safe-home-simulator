@@ -2,13 +2,15 @@ import type { BlockPolygon } from "./blockPolygon";
 
 export type GameState = "SETUP" | "PLAYING" | "GAMEOVER" | "VICTORY";
 
-export type FacilityType = "light" | "police" | "bell" | "cctv";
+export type FacilityType = "light" | "police" | "bell" | "cctv" | "store";
 export type { BlockPolygon };
 
 export interface LatLng {
   lat: number;
   lng: number;
 }
+
+export type MovementLayer = "surface" | "underground";
 
 export interface WalkLine {
   p1: LatLng;
@@ -55,9 +57,17 @@ export interface NormalizedFacility {
 
 export interface RoadsData {
   walkLines: WalkLine[];
+  /** 지하 구간으로 명시된 지하철 선로 */
+  subwayLines: WalkLine[];
   walkPolygons: LatLng[][];
+  /** 지상과 지하를 오갈 수 있는 역 구역 */
+  stationPolygons: LatLng[][];
+  /** 건물 밖을 이동할 수 있는 아파트 단지 구역 */
+  apartmentPolygons: LatLng[][];
   /** 역사 건물 제외 — 통과 불가 영역 (bbox 캐시 포함) */
   blockPolygons: BlockPolygon[];
+  /** 건물 충돌 데이터가 로드된 셀 영역. 영역 밖의 지상 이동은 잠시 차단한다. */
+  buildingCoverage?: Bbox[];
 }
 
 export interface InputState {

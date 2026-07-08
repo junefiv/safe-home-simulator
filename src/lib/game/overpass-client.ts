@@ -19,9 +19,15 @@ export function buildRoadsOverpassQuery(bbox: string): string {
   return `[out:json][timeout:25];
 (
   way["highway"](${bbox});
+  way["railway"="subway"](${bbox});
   way["building"="train_station"](${bbox});
   way["railway"="station"](${bbox});
   way["public_transport"="station"](${bbox});
+  way["station"="subway"](${bbox});
+  way["public_transport"="platform"]["subway"="yes"](${bbox});
+  node["railway"~"^(station|subway_entrance)$"](${bbox});
+  way["landuse"="residential"]["residential"~"^(apartment|apartments)$",i](${bbox});
+  way["landuse"="residential"]["name"~"(아파트|APT|Apartment)",i](${bbox});
 );
 out geom;`;
 }

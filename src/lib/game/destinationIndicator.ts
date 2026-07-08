@@ -32,7 +32,8 @@ export function computeDestinationIndicator(
 
   const dx = destPoint.x - playerPoint.x;
   const dy = destPoint.y - playerPoint.y;
-  const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+  // CSS의 ▲는 위쪽이 0도이므로, atan2의 오른쪽 0도 기준을 90도 보정한다.
+  const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
 
   const halfW = size.x / 2 - EDGE_MARGIN;
   const halfH = size.y / 2 - EDGE_MARGIN;

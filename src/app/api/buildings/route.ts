@@ -51,14 +51,17 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  try {
-    const overpass = await fetchOverpassBuildings(bbox);
-    if (overpass.length > 0) sources.push("overpass");
-    chunks.push(overpass);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Overpass 실패";
-    errors.push(msg);
-    console.warn("[buildings] Overpass:", msg);
+  // VWorld가 결과를 주면 느린 Overpass를 기다리지 않는다. Overpass는 대체 소스로만 사용한다.
+  if (chunks.every((chunk) => chunk.length === 0)) {
+    try {
+      const overpass = await fetchOverpassBuildings(bbox);
+      if (overpass.length > 0) sources.push("overpass");
+      chunks.push(overpass);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Overpass 실패";
+      errors.push(msg);
+      console.warn("[buildings] Overpass:", msg);
+    }
   }
 
   const blockPolygons = mergePolygonLists(...chunks);

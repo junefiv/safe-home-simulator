@@ -24,6 +24,7 @@ async function fetchWfsLayer(
   typeName: string,
   bbox: Bbox,
   maxFeatures: number,
+  cqlFilter?: string,
 ): Promise<WfsGeoJsonFeature[]> {
   const url = new URL(SAFEMAP_WFS_URL);
   url.searchParams.set("serviceKey", serviceKey);
@@ -35,6 +36,7 @@ async function fetchWfsLayer(
   url.searchParams.set("srsName", "EPSG:3857");
   url.searchParams.set("bbox", `${bboxWgs84To3857(bbox)},EPSG:3857`);
   url.searchParams.set("maxFeatures", String(maxFeatures));
+  if (cqlFilter) url.searchParams.set("CQL_FILTER", cqlFilter);
 
   const res = await fetch(url.toString(), { next: { revalidate: 3600 } });
   if (!res.ok) throw new Error(`WFS HTTP ${res.status}`);
@@ -58,12 +60,19 @@ export async function fetchSafemapWfsFeatures(
   bbox: Bbox,
   label: string,
   maxFeatures = WFS_MAX_FEATURES,
+  cqlFilter?: string,
 ): Promise<WfsGeoJsonFeature[]> {
   let lastError = `${label} WFS 레이어를 찾을 수 없습니다`;
 
   for (const typeName of typeNames) {
     try {
-      const features = await fetchWfsLayer(serviceKey, typeName, bbox, maxFeatures);
+      const features = await fetchWfsLayer(
+        serviceKey,
+        typeName,
+        bbox,
+        maxFeatures,
+        cqlFilter,
+      );
       if (features.length >= maxFeatures) {
         console.warn(
           `[${label}] WFS maxFeatures(${maxFeatures}) 도달 — 구간 내 시설이 더 있을 수 있습니다.`,

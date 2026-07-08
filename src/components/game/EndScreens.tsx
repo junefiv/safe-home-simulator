@@ -6,37 +6,20 @@ interface EndScreensProps {
 }
 
 export function EndScreens({ gameState, onRestart }: EndScreensProps) {
-  if (gameState === "GAMEOVER") {
-    return (
-      <div className="ui-layer">
-        <h1 className="text-6xl font-black text-red-500 mb-4">귀가 실패...</h1>
-        <p className="text-xl text-gray-300 mb-8">좀비에게 잡히고 말았습니다.</p>
-        <button
-          type="button"
-          onClick={onRestart}
-          className="px-8 py-4 bg-red-600 hover:bg-red-500 text-white rounded-full font-bold text-xl transition-all"
-        >
-          처음부터 다시
-        </button>
-      </div>
-    );
-  }
-
-  if (gameState === "VICTORY") {
-    return (
-      <div className="ui-layer">
-        <h1 className="text-6xl font-black text-green-400 mb-4">무사 귀가 성공!</h1>
-        <p className="text-xl text-gray-300 mb-8">안전하게 집에 도착했습니다.</p>
-        <button
-          type="button"
-          onClick={onRestart}
-          className="px-8 py-4 bg-green-600 hover:bg-green-500 text-white rounded-full font-bold text-xl transition-all"
-        >
-          처음부터 다시
-        </button>
-      </div>
-    );
-  }
-
-  return null;
+  if (!gameState) return null;
+  const victory = gameState === "VICTORY";
+  return (
+    <div className="ui-layer px-6 text-center" role="dialog" aria-modal="true">
+      <div className="text-6xl" aria-hidden>{victory ? "🏠" : "🧟"}</div>
+      <h1 className={`mt-5 text-5xl font-black ${victory ? "text-emerald-400" : "text-rose-500"}`}>
+        {victory ? "무사 귀가 성공!" : "귀가 실패"}
+      </h1>
+      <p className="mb-8 mt-4 text-lg text-slate-300">
+        {victory ? "안전하게 목적지에 도착했습니다." : "좀비에게 붙잡혔습니다. 다른 길로 다시 도전해 보세요."}
+      </p>
+      <button type="button" onClick={onRestart} className={`rounded-full px-8 py-4 text-lg font-bold text-white transition ${victory ? "bg-emerald-600 hover:bg-emerald-500" : "bg-rose-600 hover:bg-rose-500"}`}>
+        처음부터 다시
+      </button>
+    </div>
+  );
 }

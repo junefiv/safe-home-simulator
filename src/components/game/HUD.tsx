@@ -1,30 +1,61 @@
 "use client";
 
+import type { MovementLayer } from "@/lib/game/types";
+
 interface HUDProps {
   hp: number;
   maxHp: number;
   distToHome: number | null;
   sirenActive: boolean;
+  movementLayer: MovementLayer;
+  zombieCount: number;
+  mapDataLoading: boolean;
 }
 
-export function HUD({ hp, maxHp, distToHome, sirenActive }: HUDProps) {
-  let hearts = "";
-  for (let i = 0; i < maxHp; i++) {
-    hearts += i < hp ? "❤️" : "🖤";
-  }
+export function HUD({
+  hp,
+  maxHp,
+  distToHome,
+  sirenActive,
+  movementLayer,
+  zombieCount,
+  mapDataLoading,
+}: HUDProps) {
+  const hearts = Array.from({ length: maxHp }, (_, index) =>
+    index < hp ? "♥" : "♡",
+  ).join("");
+  const underground = movementLayer === "underground";
 
   return (
-    <div id="hud">
-      <div className="text-xl font-bold text-blue-400 mb-2">상태 정보</div>
-      <div className="text-red-400 font-bold text-lg">체력: {hearts}</div>
-      <div className="text-green-400 font-bold mt-1">
-        집까지 거리: {distToHome === null ? "계산 중..." : `${Math.floor(distToHome)}m`}
+    <aside id="hud" aria-label="게임 상태">
+      <div className="hud-topline">
+        <span className={`layer-badge ${underground ? "underground" : "surface"}`}>
+          {underground ? "🚇 지하철" : "🌙 지상"}
+        </span>
+        {mapDataLoading && <span className="map-loading">주변 지도 준비 중</span>}
       </div>
+      <div className="hud-grid">
+        <div>
+          <span className="hud-label">체력</span>
+          <strong className="hud-hearts" aria-label={`${hp}/${maxHp}`}>
+            {hearts}
+          </strong>
+        </div>
+        <div>
+          <span className="hud-label">집까지</span>
+          <strong>{distToHome === null ? "계산 중" : `${Math.floor(distToHome)}m`}</strong>
+        </div>
+        <div>
+          <span className="hud-label">추격 중</span>
+          <strong>{zombieCount}명</strong>
+        </div>
+      </div>
+      {underground && <p className="hud-hint">역에서만 지상으로 나갈 수 있습니다.</p>}
       {sirenActive && (
-        <div className="text-yellow-400 font-bold mt-3 animate-pulse">
-          🚨 사이렌 발동! 좀비들이 도망갑니다!
+        <div className="siren-alert" role="status">
+          ⚡ 안전시설 효과가 발동 중입니다
         </div>
       )}
-    </div>
+    </aside>
   );
 }
