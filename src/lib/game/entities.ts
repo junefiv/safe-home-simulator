@@ -5,6 +5,8 @@ import {
   BELL_INTERACT_DISTANCE_M,
   BELL_RADIUS_M,
   BELL_STUN_DURATION_MS,
+  CCTV_AGGRO_COOLDOWN_MS,
+  CCTV_AGGRO_RELEASE_MS,
   CCTV_RADIUS_M,
   GLOBAL_SIREN_DURATION_MS,
   LIGHT_RADIUS_M,
@@ -18,6 +20,8 @@ import {
   ZOMBIE_FLEE_SPEED_MULTIPLIER,
   STORE_FLEE_DURATION_MS,
   STORE_COOLDOWN_MS,
+  STORE_GAUGE_FILL_MS,
+  STORE_RADIUS_M,
 } from "./constants";
 import { haversineDistance } from "./geo";
 import {
@@ -44,6 +48,19 @@ export function createEmojiIcon(emoji: string, size = 30): L.DivIcon {
   });
 }
 
+/** 마커 이모지에 걷기/뛰기 모션 클래스를 적용한다. */
+function applyMotionClass(
+  marker: L.Marker,
+  motion: "idle" | "walk" | "run",
+): void {
+  const el = marker.getElement();
+  if (!el) return;
+  const inner = el.querySelector(".emoji-marker");
+  if (!inner) return;
+  inner.classList.toggle("emoji-walk", motion === "walk");
+  inner.classList.toggle("emoji-run", motion === "run");
+}
+
 export function createHomeIcon(): L.DivIcon {
   return L.divIcon({
     className: "custom-div-icon",
@@ -54,7 +71,7 @@ export function createHomeIcon(): L.DivIcon {
 }
 
 export type BellState = "IDLE" | "COUNTDOWN" | "COOLDOWN";
-export type ZombieState = "CHASE" | "FLEE" | "STUNNED" | "WANDER";
+export type ZombieState = "CHASE" | "FLEE" | "STUNNED" | "DISTRACTED";
 
 export interface PlayerCallbacks {
   onDamage: () => void;
@@ -132,10 +149,17 @@ export class Player {
       (lat, lng) => movement.canMove(current, { lat, lng }, this.movementLayer),
     );
     this.movementLayer = movement.resolveLayer(current, moved, this.movementLayer);
+    const actuallyMoved =
+      Math.abs(moved.lat - current.lat) > 1e-9 ||
+      Math.abs(moved.lng - current.lng) > 1e-9;
     this.lat = moved.lat;
     this.lng = moved.lng;
 
     this.marker.setLatLng([this.lat, this.lng]);
+    applyMotionClass(
+      this.marker,
+      !actuallyMoved ? "idle" : speedMultiplier > 1 ? "run" : "walk",
+    );
     this.map.panTo([this.lat, this.lng], {
       animate: false,
       noMoveStart: true,
@@ -175,8 +199,10 @@ export class Zombie {
   state: ZombieState = "CHASE";
   marker: L.Marker;
   movementLayer: MovementLayer;
-  wanderHeading = 0;
-  wanderTimer = 0;
+  /** CCTV 어그로 해제 남은 시간(ms). >0 이면 플레이어를 쫓지 않음 */
+  aggroReleaseTimer = 0;
+  /** CCTV id별 어그로 해제 재발동 쿨다운 남은 시간(ms) */
+  cctvCooldowns = new Map<string, number>();
 
   constructor(
     lat: number,
@@ -206,12 +232,23 @@ export class Zombie {
     movement: MovementResolver,
   ): void {
     const previousState = this.state;
+
+    for (const [id, remaining] of this.cctvCooldowns) {
+      const next = remaining - dt;
+      if (next <= 0) this.cctvCooldowns.delete(id);
+      else this.cctvCooldowns.set(id, next);
+    }
+    if (this.aggroReleaseTimer > 0) {
+      this.aggroReleaseTimer -= dt;
+    }
+
     if (globalStunActive) {
       this.state = "STUNNED";
       this.speed = 0;
       if (previousState !== "STUNNED") {
         this.marker.setIcon(createEmojiIcon("⚡🧟⚡", 35));
       }
+      applyMotionClass(this.marker, "idle");
       this.marker.setOpacity(Math.floor(Date.now() / 120) % 2 === 0 ? 0.45 : 1);
       return;
     }
@@ -224,7 +261,6 @@ export class Zombie {
     let policeLat = 0;
     let policeLng = 0;
     let inLight = false;
-    let inCctv = false;
 
     const self = this.latlng;
     for (const f of facilities) {
@@ -241,9 +277,15 @@ export class Zombie {
         inLight = true;
       }
       if (f.type === "cctv" && haversineDistance(self, f.latlng) < f.radius) {
-        inCctv = true;
+        // 이 CCTV로 최근에 어그로가 해제되지 않았다면 새로 해제한다.
+        if (!this.cctvCooldowns.has(f.id)) {
+          this.aggroReleaseTimer = CCTV_AGGRO_RELEASE_MS;
+          this.cctvCooldowns.set(f.id, CCTV_AGGRO_COOLDOWN_MS);
+        }
       }
     }
+
+    const distracted = this.aggroReleaseTimer > 0;
 
     if (nearPolice) {
       this.state = "FLEE";
@@ -253,15 +295,9 @@ export class Zombie {
       this.state = "FLEE";
       targetLat = player.lat;
       targetLng = player.lng;
-    } else if (inCctv) {
-      this.state = "WANDER";
-      this.wanderTimer -= dt;
-      if (this.wanderTimer <= 0) {
-        this.wanderHeading = Math.random() * Math.PI * 2;
-        this.wanderTimer = 700 + Math.random() * 900;
-      }
-      targetLat = this.lat + Math.sin(this.wanderHeading) * 0.001;
-      targetLng = this.lng + Math.cos(this.wanderHeading) * 0.001;
+    } else if (distracted) {
+      // 어그로 해제: 플레이어를 쫓지 않고 그 자리에 멈춘다.
+      this.state = "DISTRACTED";
     } else {
       this.state = "CHASE";
     }
@@ -270,10 +306,19 @@ export class Zombie {
     if (this.state !== previousState) {
       this.marker.setIcon(
         createEmojiIcon(
-          this.state === "FLEE" ? "🏃" : this.state === "WANDER" ? "❓🧟" : "🧟",
+          this.state === "FLEE"
+            ? "🏃"
+            : this.state === "DISTRACTED"
+              ? "❓🧟"
+              : "🧟",
           35,
         ),
       );
+    }
+
+    if (this.state === "DISTRACTED") {
+      applyMotionClass(this.marker, "idle");
+      return;
     }
 
     let dy = targetLat - this.lat;
@@ -313,9 +358,18 @@ export class Zombie {
         { probeAngles: ZOMBIE_PROBE_ANGLES },
       );
       this.movementLayer = movement.resolveLayer(current, moved, this.movementLayer);
+      const actuallyMoved =
+        Math.abs(moved.lat - current.lat) > 1e-9 ||
+        Math.abs(moved.lng - current.lng) > 1e-9;
       this.lat = moved.lat;
       this.lng = moved.lng;
       this.marker.setLatLng([this.lat, this.lng]);
+      applyMotionClass(
+        this.marker,
+        !actuallyMoved ? "idle" : this.state === "FLEE" ? "run" : "walk",
+      );
+    } else {
+      applyMotionClass(this.marker, "idle");
     }
 
     const distToPlayer = haversineDistance(this.latlng, player.latlng);
@@ -358,6 +412,8 @@ export class GameFacility {
   circle: L.Circle | null;
   readonly id: string;
   activated = false;
+  /** 편의점 게이지 진행도 0~1 */
+  gaugeProgress = 0;
 
   constructor(
     data: NormalizedFacility,
@@ -386,7 +442,10 @@ export class GameFacility {
       this.marker.bindPopup(lines);
     }
     this.circle =
-      this.type === "light" || this.type === "bell" || this.type === "cctv"
+      this.type === "light" ||
+      this.type === "bell" ||
+      this.type === "cctv" ||
+      this.type === "store"
         ? this.createCircle()
         : null;
   }
@@ -399,6 +458,7 @@ export class GameFacility {
     if (type === "light") return LIGHT_RADIUS_M;
     if (type === "cctv") return CCTV_RADIUS_M;
     if (type === "police") return POLICE_RADIUS_M;
+    if (type === "store") return STORE_RADIUS_M;
     return BELL_RADIUS_M;
   }
 
@@ -447,6 +507,15 @@ export class GameFacility {
         dashArray: "5, 5",
       }).addTo(this.map);
     }
+    if (this.type === "store") {
+      return L.circle([this.lat, this.lng], {
+        radius: this.radius,
+        color: "#22c55e",
+        fillColor: "#4ade80",
+        fillOpacity: 0.2,
+        weight: 1,
+      }).addTo(this.map);
+    }
     return L.circle([this.lat, this.lng], {
       radius: this.radius,
       color: "red",
@@ -457,7 +526,7 @@ export class GameFacility {
   }
 
   update(dt: number): void {
-    if (this.type !== "bell" && this.type !== "store") return;
+    if (this.type !== "bell") return;
 
     if (this.bellState === "COUNTDOWN") {
       this.countdown -= dt;
@@ -471,11 +540,7 @@ export class GameFacility {
         }),
       );
       if (this.countdown <= 0) {
-        if (this.type === "bell") {
-          this.callbacks.onBellStun(BELL_STUN_DURATION_MS);
-        } else {
-          this.callbacks.onStoreFlee(STORE_FLEE_DURATION_MS);
-        }
+        this.callbacks.onBellStun(BELL_STUN_DURATION_MS);
         this.bellState = "COOLDOWN";
         this.countdown = BELL_COOLDOWN_MS;
         this.circle?.setStyle({ color: "gray", fillColor: "gray" });
@@ -497,13 +562,64 @@ export class GameFacility {
     }
   }
 
-  touch(playerPos: LatLng, playing = true): void {
-    if (!playing || haversineDistance(this.latlng, playerPos) > BELL_INTERACT_DISTANCE_M) {
+  /**
+   * 편의점 게이지: 반경 안에 머무르면 게이지가 차오르고, 가득 차면 발동한다.
+   * 발동 후에는 쿨다운 동안 재충전되지 않는다.
+   */
+  updateStore(dt: number, playerPos: LatLng, playing: boolean): void {
+    if (this.type !== "store") return;
+
+    if (this.bellState === "COOLDOWN") {
+      this.countdown -= dt;
+      this.gaugeProgress = 0;
+      if (this.marker instanceof L.Marker) {
+        this.marker.setIcon(createEmojiIcon("⏳", this.iconSize()));
+      }
+      if (this.countdown <= 0) {
+        this.bellState = "IDLE";
+        this.circle?.setStyle({ color: "#22c55e", fillColor: "#4ade80" });
+        if (this.marker instanceof L.Marker) {
+          this.marker.setIcon(
+            createEmojiIcon(this.emojiForType(this.type), this.iconSize()),
+          );
+        }
+      }
       return;
     }
 
+    const inRange =
+      playing && haversineDistance(this.latlng, playerPos) <= this.radius;
+
+    if (inRange) {
+      this.gaugeProgress = Math.min(1, this.gaugeProgress + dt / STORE_GAUGE_FILL_MS);
+      this.circle?.setStyle({ color: "#16a34a", fillColor: "#22c55e", fillOpacity: 0.35 });
+      if (this.gaugeProgress >= 1) {
+        this.gaugeProgress = 0;
+        this.bellState = "COOLDOWN";
+        this.countdown = STORE_COOLDOWN_MS;
+        this.callbacks.onStoreFlee(STORE_FLEE_DURATION_MS);
+        this.callbacks.onToast(
+          "에너지 드링크 획득! 5초 동안 이동 속도가 1.2배가 되고 좀비가 도망갑니다.",
+        );
+        this.circle?.setStyle({ color: "gray", fillColor: "gray", fillOpacity: 0.2 });
+      }
+    } else if (this.gaugeProgress > 0) {
+      // 반경을 벗어나면 게이지가 서서히 줄어든다.
+      this.gaugeProgress = Math.max(0, this.gaugeProgress - dt / STORE_GAUGE_FILL_MS);
+      if (this.gaugeProgress === 0) {
+        this.circle?.setStyle({ color: "#22c55e", fillColor: "#4ade80", fillOpacity: 0.2 });
+      }
+    }
+  }
+
+  touch(playerPos: LatLng, playing = true): void {
+    if (!playing) return;
+
+    const dist = haversineDistance(this.latlng, playerPos);
+
+    // 파출소·지구대: 반경(8m) 안에 들어오면 자동으로 안전구역 활성화
     if (this.type === "police") {
-      if (this.activated) return;
+      if (this.activated || dist > this.radius) return;
       this.activated = true;
       this.circle = this.createCircle();
       this.callbacks.onPoliceRest();
@@ -511,28 +627,13 @@ export class GameFacility {
       return;
     }
 
-    if (this.type === "store") {
-      if (this.bellState !== "IDLE") return;
-      this.bellState = "COOLDOWN";
-      this.countdown = STORE_COOLDOWN_MS;
-      this.callbacks.onStoreFlee(STORE_FLEE_DURATION_MS);
-      this.callbacks.onToast(
-        "에너지 드링크 획득! 5초 동안 이동 속도가 1.2배가 되고 좀비가 도망갑니다.",
-      );
-      return;
+    // 안심벨: 근접 시 카운트다운 시작
+    if (this.type === "bell") {
+      if (this.bellState !== "IDLE" || dist > BELL_INTERACT_DISTANCE_M) return;
+      this.bellState = "COUNTDOWN";
+      this.countdown = BELL_COUNTDOWN_MS;
+      this.callbacks.onToast("비상벨 감지! 5초 뒤 좀비가 감전됩니다.");
     }
-
-    if (this.type !== "bell" || this.bellState !== "IDLE") {
-      return;
-    }
-
-    this.bellState = "COUNTDOWN";
-    this.countdown = BELL_COUNTDOWN_MS;
-    this.callbacks.onToast(
-      this.type === "bell"
-        ? "비상벨 감지! 5초 뒤 좀비가 감전됩니다."
-        : "편의점 진입! 5초 뒤 좀비가 반대 방향으로 도망갑니다.",
-    );
   }
 
   interact(getPlayerLatLng: () => LatLng | null, playing = true): void {

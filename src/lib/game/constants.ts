@@ -61,19 +61,28 @@ export const BUILDING_TILE_CHECK_MS = 500;
 /** 동시 건물 로드 수 */
 export const BUILDING_MAX_CONCURRENT = 1;
 
-export const LIGHT_RADIUS_M = 20;
-export const CCTV_RADIUS_M = 15;
-export const POLICE_RADIUS_M = 15;
-export const BELL_RADIUS_M = 10;
+export const LIGHT_RADIUS_M = 5;
+export const CCTV_RADIUS_M = 10;
+/** 파출소·지구대 자동 발동 반경(미터) */
+export const POLICE_RADIUS_M = 8;
+export const BELL_RADIUS_M = 5;
 export const BELL_INTERACT_DISTANCE_M = 4;
 export const BELL_COUNTDOWN_MS = 5000;
 export const BELL_COOLDOWN_MS = 30000;
 export const BELL_STUN_DURATION_MS = 5000;
+/** 편의점 자동 발동 반경(미터) */
+export const STORE_RADIUS_M = 8;
+/** 편의점 반경 안에서 게이지가 가득 차기까지 시간(ms) */
+export const STORE_GAUGE_FILL_MS = 2500;
 export const STORE_FLEE_DURATION_MS = 5000;
 export const STORE_COOLDOWN_MS = 60000;
 export const STORE_PLAYER_SPEED_MULTIPLIER = 1.2;
 export const GLOBAL_SIREN_DURATION_MS = STORE_FLEE_DURATION_MS;
 export const LIGHT_SLOW_FACTOR = 0.9;
+/** CCTV 반경에 닿은 좀비의 어그로 해제 지속 시간(ms) */
+export const CCTV_AGGRO_RELEASE_MS = 5000;
+/** 같은 CCTV가 같은 좀비에게 다시 어그로를 해제하기까지의 쿨다운(ms) */
+export const CCTV_AGGRO_COOLDOWN_MS = 30000;
 
 export const FACILITIES_BBOX_PADDING = 0.15;
 export const FACILITIES_CACHE_TTL_MS = 5 * 60 * 1000;

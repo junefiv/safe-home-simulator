@@ -129,6 +129,8 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const [movementLayer, setMovementLayer] = useState<MovementLayer>("surface");
   const [zombieCount, setZombieCount] = useState(0);
   const [mapDataLoading, setMapDataLoading] = useState(false);
+  const [storeGauge, setStoreGauge] = useState(0);
+  const lastStoreGaugeRef = useRef(0);
 
   const endRef = useRef<LatLng | null>(null);
   const [destination, setDestination] = useState<LatLng | null>(null);
@@ -559,6 +561,20 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
           setZombieCount(result.zombies.length);
         }
 
+        let maxGauge = 0;
+        for (const facility of facilitiesRef.current) {
+          if (facility.type === "store" && facility.gaugeProgress > maxGauge) {
+            maxGauge = facility.gaugeProgress;
+          }
+        }
+        if (
+          Math.abs(maxGauge - lastStoreGaugeRef.current) > 0.02 ||
+          (maxGauge > 0) !== (lastStoreGaugeRef.current > 0)
+        ) {
+          lastStoreGaugeRef.current = maxGauge;
+          setStoreGauge(maxGauge);
+        }
+
         scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
 
         if (
@@ -657,6 +673,17 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         distToHome={distToHome}
         active={gameState === "PLAYING"}
       />
+      {showHud && storeGauge > 0 && (
+        <div className="store-gauge" role="status">
+          <div className="store-gauge-label">🏪 에너지 드링크 충전 중…</div>
+          <div className="store-gauge-track">
+            <div
+              className="store-gauge-fill"
+              style={{ width: `${Math.round(storeGauge * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
       <Joystick
         visible={showHud && showJoystick}
         onChange={(v) => {

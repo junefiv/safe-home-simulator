@@ -213,7 +213,10 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
     playerSpeedMultiplier,
   );
   for (const facility of facilities) {
-    if (facility.type === "bell" || facility.type === "store") facility.update(dt);
+    if (facility.type === "bell") facility.update(dt);
+    else if (facility.type === "store") {
+      facility.updateStore(dt, player.latlng, playing);
+    }
   }
 
   const spawnResult = spawnZombies({

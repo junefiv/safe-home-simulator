@@ -360,3 +360,81 @@ html {
     width: calc(100vw - 24px);
   }
 }
+
+/* 캐릭터/좀비 걷기·뛰기 모션 */
+.emoji-marker {
+  transform-origin: 50% 90%;
+  will-change: transform;
+}
+
+.emoji-marker.emoji-walk {
+  animation: emoji-walk 0.45s ease-in-out infinite;
+}
+
+.emoji-marker.emoji-run {
+  animation: emoji-run 0.26s ease-in-out infinite;
+}
+
+@keyframes emoji-walk {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-5deg);
+  }
+  50% {
+    transform: translateY(-2px) rotate(5deg);
+  }
+}
+
+@keyframes emoji-run {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-9deg) scale(1.06);
+  }
+  50% {
+    transform: translateY(-4px) rotate(9deg) scale(1.12);
+  }
+}
+
+/* 편의점 게이지 UI */
+.store-gauge {
+  position: absolute;
+  left: 50%;
+  bottom: 190px;
+  transform: translateX(-50%);
+  z-index: 600;
+  width: min(280px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(8, 15, 29, 0.9);
+  border: 1px solid rgba(74, 222, 128, 0.5);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  text-align: center;
+  pointer-events: none;
+}
+
+.store-gauge-label {
+  color: #bbf7d0;
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.store-gauge-track {
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+}
+
+.store-gauge-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22c55e, #86efac);
+  transition: width 80ms linear;
+}
+
+@media (max-width: 768px) {
+  .store-gauge {
+    bottom: 210px;
+  }
+}
