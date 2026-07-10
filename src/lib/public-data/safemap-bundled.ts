@@ -3,31 +3,21 @@ import { join } from "node:path";
 import type { NormalizedFacility } from "@/lib/game/types";
 
 const CACHE_DIR = join(process.cwd(), ".cache");
-const LIGHTS_PATHS = [
-  join(CACHE_DIR, "security-lights.json"),
-  join(process.cwd(), "src/data/security-lights.json"),
-];
-const CCTV_PATHS = [
-  join(CACHE_DIR, "cctv-stations.json"),
-  join(process.cwd(), "src/data/cctv-stations.json"),
-];
 
-async function readFirstAvailable(paths: string[]): Promise<unknown> {
-  for (const path of paths) {
-    try {
-      const raw = await readFile(path, "utf8");
-      return JSON.parse(raw);
-    } catch {
-      // try next path
-    }
+const LIGHTS_PATH = join(CACHE_DIR, "security-lights.json");
+const CCTV_PATH = join(CACHE_DIR, "cctv-stations.json");
+const STORE_PATH = join(CACHE_DIR, "convenience-stores.json");
+const BELL_PATH = join(CACHE_DIR, "emergency-bells.json");
+const POLICE_PATH = join(CACHE_DIR, "police-stations.json");
+
+async function readCacheJson(path: string): Promise<unknown> {
+  try {
+    const raw = await readFile(path, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return [];
   }
-  return [];
 }
-
-let lightsCache: NormalizedFacility[] | null = null;
-let cctvCache: NormalizedFacility[] | null = null;
-let lightsPromise: Promise<NormalizedFacility[]> | null = null;
-let cctvPromise: Promise<NormalizedFacility[]> | null = null;
 
 function asFacilities(data: unknown, type: NormalizedFacility["type"]): NormalizedFacility[] {
   if (!Array.isArray(data)) return [];
@@ -41,32 +31,55 @@ function asFacilities(data: unknown, type: NormalizedFacility["type"]): Normaliz
   );
 }
 
-export async function getBundledLightFacilities(): Promise<NormalizedFacility[]> {
-  if (lightsCache) return lightsCache;
-  if (!lightsPromise) {
-    lightsPromise = readFirstAvailable(LIGHTS_PATHS).then((data) => {
-      lightsCache = asFacilities(data, "light");
-      if (lightsCache.length > 0) {
-        console.log(`[safemap] 보안등 ${lightsCache.length.toLocaleString()}건 로드`);
+function loadCached(
+  path: string,
+  type: NormalizedFacility["type"],
+  label: string,
+  cache: { value: NormalizedFacility[] | null },
+  promise: { current: Promise<NormalizedFacility[]> | null },
+): Promise<NormalizedFacility[]> {
+  if (cache.value) return Promise.resolve(cache.value);
+  if (!promise.current) {
+    promise.current = readCacheJson(path).then((data) => {
+      cache.value = asFacilities(data, type);
+      if (cache.value.length > 0) {
+        console.log(`[facility] ${label} ${cache.value.length.toLocaleString()}건 로드`);
       }
-      return lightsCache;
+      return cache.value;
     });
   }
-  return lightsPromise;
+  return promise.current;
+}
+
+const lightsState = { value: null as NormalizedFacility[] | null };
+const lightsPromise = { current: null as Promise<NormalizedFacility[]> | null };
+const cctvState = { value: null as NormalizedFacility[] | null };
+const cctvPromise = { current: null as Promise<NormalizedFacility[]> | null };
+const storeState = { value: null as NormalizedFacility[] | null };
+const storePromise = { current: null as Promise<NormalizedFacility[]> | null };
+const bellState = { value: null as NormalizedFacility[] | null };
+const bellPromise = { current: null as Promise<NormalizedFacility[]> | null };
+const policeState = { value: null as NormalizedFacility[] | null };
+const policePromise = { current: null as Promise<NormalizedFacility[]> | null };
+
+export async function getBundledLightFacilities(): Promise<NormalizedFacility[]> {
+  return loadCached(LIGHTS_PATH, "light", "보안등", lightsState, lightsPromise);
 }
 
 export async function getBundledCctvFacilities(): Promise<NormalizedFacility[]> {
-  if (cctvCache) return cctvCache;
-  if (!cctvPromise) {
-    cctvPromise = readFirstAvailable(CCTV_PATHS).then((data) => {
-      cctvCache = asFacilities(data, "cctv");
-      if (cctvCache.length > 0) {
-        console.log(`[safemap] CCTV ${cctvCache.length.toLocaleString()}건 로드`);
-      }
-      return cctvCache;
-    });
-  }
-  return cctvPromise;
+  return loadCached(CCTV_PATH, "cctv", "CCTV", cctvState, cctvPromise);
+}
+
+export async function getBundledStoreFacilities(): Promise<NormalizedFacility[]> {
+  return loadCached(STORE_PATH, "store", "편의점", storeState, storePromise);
+}
+
+export async function getBundledBellFacilities(): Promise<NormalizedFacility[]> {
+  return loadCached(BELL_PATH, "bell", "안전비상벨", bellState, bellPromise);
+}
+
+export async function getBundledPoliceFacilities(): Promise<NormalizedFacility[]> {
+  return loadCached(POLICE_PATH, "police", "파출소/지구대", policeState, policePromise);
 }
 
 export type SafemapBundledSource = "bundled-json" | "empty";
@@ -78,5 +91,10 @@ export async function getBundledLightSource(): Promise<SafemapBundledSource> {
 
 export async function getBundledCctvSource(): Promise<SafemapBundledSource> {
   const rows = await getBundledCctvFacilities();
+  return rows.length > 0 ? "bundled-json" : "empty";
+}
+
+export async function getBundledStoreSource(): Promise<SafemapBundledSource> {
+  const rows = await getBundledStoreFacilities();
   return rows.length > 0 ? "bundled-json" : "empty";
 }

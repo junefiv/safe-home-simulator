@@ -122,7 +122,7 @@ export function StartScreen({ visible, loading, loadingLabel, onStart, onToast }
         </div>
         <div className="mt-5 rounded-2xl border border-slate-700 bg-slate-950/70 p-4 text-sm text-slate-300">
           <strong className="text-white">이동 안내</strong>
-          <p className="mt-2 leading-6">도로·골목·역·아파트 단지로 이동하세요. 지하철은 역에서만 드나들 수 있으며 지상 캐릭터와 충돌하지 않습니다.</p>
+          <p className="mt-2 leading-6">도로·골목·역·아파트 단지로 이동하세요. 건물은 통과할 수 없습니다.</p>
         </div>
         <button type="button" disabled={loading} onClick={submit} className="mt-6 flex w-full items-center justify-center rounded-xl bg-blue-600 py-4 text-lg font-bold text-white shadow-lg transition hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60">
           {loading ? loadingLabel : "귀가 시작"}

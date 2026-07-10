@@ -60,9 +60,53 @@ html {
   color: white;
 }
 
-.hidden {
-  display: none !important;
+.route-preview-layer {
+  z-index: 1100;
 }
+
+.route-preview-path-draft {
+  animation: route-dash 1.2s linear infinite;
+}
+
+.route-preview-path-snapped {
+  animation: route-glow 1.6s ease-in-out infinite;
+}
+
+.route-preview-facility-pop {
+  animation: facility-pop 0.45s ease-out both;
+}
+
+.route-preview-difficulty-bar {
+  transition: width 0.35s ease-out;
+}
+
+@keyframes route-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+@keyframes route-glow {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes facility-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+}
+
 
 .emoji-marker {
   font-size: 24px;

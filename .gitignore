@@ -17,7 +17,7 @@
 /.next/
 /out/
 
-# daily police geocode cache
+# facility JSON/CSV cache (Vercel Blob 등 외부 저장소 사용)
 /.cache/
 
 # production

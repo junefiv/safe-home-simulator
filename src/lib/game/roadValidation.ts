@@ -4,6 +4,7 @@ import {
   ROAD_BRIDGE_MAX_M,
   ROAD_JUNCTION_SLACK_M,
   ROAD_SEGMENT_TOLERANCE_M,
+  ROAD_STRICT_ENDPOINT_SLACK_M,
   WALKABLE_HIGHWAY_TYPES,
 } from "./constants";
 import { haversineDistance } from "./geo";
@@ -218,25 +219,11 @@ function nearbyWalkLines(lat: number, lng: number, walkLines: WalkLine[]): WalkL
   return getRoadIndex(walkLines).get(key) ?? [];
 }
 
-const ALLEY_HIGHWAYS = new Set([
-  "service",
-  "living_street",
-  "residential",
-  "unclassified",
-  "footway",
-  "path",
-  "pedestrian",
-  "steps",
-  "track",
-]);
-
-function isOnMappedAlleyCenterline(point: LatLng, walkLines: WalkLine[]): boolean {
-  return nearbyWalkLines(point.lat, point.lng, walkLines).some(
-    (line) =>
-      !line.isBridge &&
-      Boolean(line.highway && ALLEY_HIGHWAYS.has(line.highway)) &&
-      distanceToSegment(point, line.p1, line.p2) <= 1.8,
-  );
+function isOnWalkRoad(point: LatLng, walkLines: WalkLine[]): boolean {
+  return matchWalkRoadOnLines(point, point.lat, point.lng, walkLines, {
+    includeBridges: true,
+    endpointSlackM: ROAD_STRICT_ENDPOINT_SLACK_M,
+  }).onRoad;
 }
 
 function isInsideAnyZone(pt: LatLng, polygons: LatLng[][]): boolean {
@@ -403,23 +390,9 @@ export function createMovementResolver(roads: RoadsData): MovementResolver {
       ).onRoad;
     }
 
-    const coverage = roads.buildingCoverage;
-    if (
-      coverage &&
-      !coverage.some(
-        (bbox) =>
-          point.lat >= bbox.south &&
-          point.lat <= bbox.north &&
-          point.lng >= bbox.west &&
-          point.lng <= bbox.east,
-      )
-    ) {
-      return false;
-    }
-
     if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) {
-      // 좁은 골목은 건물 경계 데이터가 수 m 겹치는 경우가 있어 중심선만 통과시킨다.
-      return isOnMappedAlleyCenterline(point, roads.walkLines);
+      // 도로(좁은 골목·넓은 대로 모두) 위면 건물 데이터 겹침과 관계없이 통행 허용
+      return isOnWalkRoad(point, roads.walkLines);
     }
     if (isInsideAnyZone(point, roads.apartmentPolygons ?? roads.walkPolygons ?? [])) {
       return true;
@@ -459,8 +432,9 @@ export function isValidPosition(
 
   const insideBuilding = isInsideAnyBuilding(pt, blockPolygons);
 
-  // 도로 폭 보정이나 보조 연결선이 건물과 겹쳐도 건물 내부는 통과하지 않는다.
-  if (insideBuilding) return false;
+  if (insideBuilding) {
+    return isOnWalkRoad(pt, walkLines);
+  }
 
   // 역과 아파트 단지의 건물 밖 공간은 이동할 수 있다.
   if (isInsideWalkableZone(pt, walkPolygons)) return true;

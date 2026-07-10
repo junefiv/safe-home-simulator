@@ -1,14 +1,15 @@
 /**
- * 경찰청 파출소 API + Vworld 지오코딩 → src/data/police-stations.json 생성
+ * 경찰청 파출소 API + Vworld 지오코딩 → .cache/police-stations.json 생성
  *
- * 사용법:
- *   ODCLOUD_SERVICE_KEY=... VWORLD_API_KEY=... npm run build:police-stations
+ *   npm run build:police-stations
  */
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const CACHE_DIR = join(__dirname, "../.cache");
+const OUT_PATH = join(CACHE_DIR, "police-stations.json");
 const ENDPOINT =
   "https://api.odcloud.kr/api/15077036/v1/uddi:6b371c66-09a5-4efd-8445-bfd53672542e";
 const VWORLD_URL = "https://api.vworld.kr/req/address";
@@ -107,6 +108,7 @@ async function geocode(address) {
 
 async function main() {
   console.log("경찰청 파출소 목록 조회 중...");
+  mkdirSync(CACHE_DIR, { recursive: true });
   const records = await fetchAllRecords();
   const facilities = [];
   const cache = new Map();
@@ -139,15 +141,13 @@ async function main() {
 
     if ((i + 1) % 50 === 0) {
       console.log(`지오코딩 진행: ${i + 1}/${records.length} (성공 ${facilities.length})`);
-      const outPath = join(__dirname, "..", "src", "data", "police-stations.json");
-      writeFileSync(outPath, JSON.stringify(facilities, null, 2), "utf8");
+      writeFileSync(OUT_PATH, JSON.stringify(facilities, null, 2), "utf8");
     }
     await sleep(120);
   }
 
-  const outPath = join(__dirname, "..", "src", "data", "police-stations.json");
-  writeFileSync(outPath, JSON.stringify(facilities, null, 2), "utf8");
-  console.log(`완료: ${facilities.length}개 저장 → ${outPath}`);
+  writeFileSync(OUT_PATH, JSON.stringify(facilities, null, 2), "utf8");
+  console.log(`완료: ${facilities.length}개 저장 → ${OUT_PATH}`);
 }
 
 main().catch((err) => {

@@ -7,7 +7,6 @@ import { fetchLightFacilities } from "@/lib/public-data/adapters/light";
 import { fetchPoliceFacilities } from "@/lib/public-data/adapters/police";
 import { fetchStoreFacilities } from "@/lib/public-data/adapters/store";
 import { getEmergencyBellFacilities } from "@/lib/public-data/emergency-bells";
-import { resolveSafemapServiceKey } from "@/lib/public-data/safemap-key";
 import { ensureMinimumBbox, filterByBbox } from "@/lib/public-data/bbox-filter";
 import {
   buildTypeLoadInfo,
@@ -45,11 +44,7 @@ function parseBbox(searchParams: URLSearchParams): Bbox | null {
   };
 }
 
-function resolveOdcloudServiceKeyFromEnv(): string {
-  return resolveOdcloudServiceKey();
-}
-
-const BUILD_HINT = "npm run build:safemap-facilities 로 전국 데이터를 생성하세요.";
+const BUILD_HINT = "npm run build:facility-cache && npm run convert:facility-csv";
 
 export async function GET(request: NextRequest) {
   const bbox = parseBbox(request.nextUrl.searchParams);
@@ -80,17 +75,28 @@ export async function GET(request: NextRequest) {
 
   const nationwideLights = await fetchLightFacilities();
   const nationwideCctv = await fetchCctvFacilities();
+  const nationwideStores = await fetchStoreFacilities();
+  const nationwidePolice = await fetchPoliceFacilities();
   let lightError: string | undefined;
   let cctvError: string | undefined;
-  const lightSource =
-    nationwideLights.length > 0 ? "bundled-json" : "empty";
-  const resolvedCctvSource = nationwideCctv.length > 0 ? "csv-cache" : "empty";
+  let storeError: string | undefined;
+  let policeError: string | undefined;
+  const lightSource = nationwideLights.length > 0 ? "bundled-json" : "empty";
+  const resolvedCctvSource = nationwideCctv.length > 0 ? "bundled-json" : "empty";
+  const storeSource = nationwideStores.length > 0 ? "bundled-json" : "empty";
+  const policeSource = nationwidePolice.length > 0 ? "bundled-json" : "empty";
 
   if (nationwideLights.length === 0) {
     lightError = `security-lights.json 비어 있음. ${BUILD_HINT}`;
   }
   if (nationwideCctv.length === 0) {
-    cctvError = `cctv-stations.json 비어 있음 (CCTV 레이어 미배포 가능). ${BUILD_HINT}`;
+    cctvError = `cctv-stations.json 비어 있음. ${BUILD_HINT}`;
+  }
+  if (nationwideStores.length === 0) {
+    storeError = `convenience-stores.json 비어 있음. ${BUILD_HINT}`;
+  }
+  if (nationwidePolice.length === 0) {
+    policeError = `police-stations.json 비어 있음. ${BUILD_HINT}`;
   }
 
   if (useMock) {
@@ -115,41 +121,12 @@ export async function GET(request: NextRequest) {
 
   if (!useMock) {
     bellFacilities = filterByBbox(await getEmergencyBellFacilities(), gameBbox);
-    bellSource = bellFacilities.length > 0 ? "csv-cache" : "none";
+    bellSource = bellFacilities.length > 0 ? "bundled-json" : "none";
     bellError = bellFacilities.length > 0 ? undefined : "현재 구간에 안전비상벨이 없습니다.";
   }
 
-  let storeFacilities: NormalizedFacility[] = [];
-  let storeError: string | undefined;
-  try {
-    storeFacilities = await fetchStoreFacilities(resolveSafemapServiceKey(), gameBbox);
-  } catch (err) {
-    storeError = err instanceof Error ? err.message : "편의점 로딩 실패";
-  }
-
-  let policeFacilities: NormalizedFacility[] = [];
-  let policeError: string | undefined;
-  let policeSource = "none";
-  const hasPoliceKeys =
-    Boolean(resolveOdcloudServiceKeyFromEnv()) &&
-    Boolean(process.env.VWORLD_API_KEY?.trim());
-
-  if (hasPoliceKeys) {
-    try {
-      const policeResult = await fetchPoliceFacilities(odcloudKey, process.env.POLICE_API_URL);
-      policeFacilities = policeResult.facilities;
-      policeFacilities = filterByBbox(policeFacilities, gameBbox);
-      policeSource = policeResult.source;
-      if (policeFacilities.length === 0) {
-        policeError = "파출소 목록이 비어 있습니다. 키·캐시를 확인해주세요.";
-      }
-    } catch (err) {
-      policeFacilities = [];
-      policeError = err instanceof Error ? err.message : "파출소 로딩 실패";
-    }
-  } else if (!useMock) {
-    policeError = "ODCLOUD_SERVICE_KEY 또는 VWORLD_API_KEY가 설정되지 않았습니다.";
-  }
+  const storeFacilities = filterByBbox(nationwideStores, gameBbox);
+  const policeFacilities = filterByBbox(nationwidePolice, gameBbox);
 
   const facilities = [
     ...bellFacilities,
@@ -176,7 +153,7 @@ export async function GET(request: NextRequest) {
     store: buildTypeLoadInfo(
       storeFacilities,
       gameBbox,
-      storeFacilities.length > 0 ? "api-wfs" : "none",
+      storeSource,
       false,
       storeError,
     ),

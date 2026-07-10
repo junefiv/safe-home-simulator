@@ -1,6 +1,6 @@
 import type { BlockPolygon } from "./blockPolygon";
 
-export type GameState = "SETUP" | "PLAYING" | "GAMEOVER" | "VICTORY";
+export type GameState = "SETUP" | "BRIEFING" | "PLAYING" | "GAMEOVER" | "VICTORY";
 
 export type FacilityType = "light" | "police" | "bell" | "cctv" | "store";
 export type { BlockPolygon };

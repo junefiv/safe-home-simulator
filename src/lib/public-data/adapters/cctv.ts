@@ -1,7 +1,7 @@
 import type { NormalizedFacility } from "../types";
-import { getCctvCsvFacilities } from "../cctv-csv";
+import { getBundledCctvFacilities } from "../safemap-bundled";
 
-/** 전국 CCTV — src/data/cctv-stations.json (npm run build:safemap-facilities) */
+/** 전국 CCTV — .cache/cctv-stations.json (npm run convert:facility-csv) */
 export async function fetchCctvFacilities(): Promise<NormalizedFacility[]> {
-  return getCctvCsvFacilities();
+  return getBundledCctvFacilities();
 }

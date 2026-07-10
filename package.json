@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "build:police-stations": "node --env-file=.env.local scripts/build-police-stations.mjs",
-    "build:safemap-facilities": "node --env-file=.env.local scripts/build-safemap-facilities.mjs"
+    "build:safemap-facilities": "node --env-file=.env.local scripts/build-safemap-facilities.mjs",
+    "build:convenience-stores": "node --env-file=.env.local scripts/build-safemap-facilities.mjs stores",
+    "build:facility-cache": "npm run build:police-stations && npm run build:safemap-facilities && npm run convert:facility-csv",
+    "convert:facility-csv": "python scripts/convert_facility_csv.py"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^2.1.1",

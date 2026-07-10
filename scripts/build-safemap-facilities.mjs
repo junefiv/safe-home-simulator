@@ -1,7 +1,9 @@
 /**
- * 생활안전지도 WFS → security-lights.json, cctv-stations.json 생성
+ * 생활안전지도 WFS → security-lights.json, convenience-stores.json 생성
+ * (CCTV·비상벨은 .cache CSV → npm run convert:facility-csv)
  *
- *   npm run build:safemap-facilities
+ *   npm run build:safemap-facilities          # 보안등 + 편의점
+ *   npm run build:convenience-stores          # 편의점만
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,8 +11,9 @@ import { fileURLToPath } from "node:url";
 import proj4 from "proj4";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUT_LIGHTS = join(__dirname, "../.cache/security-lights.json");
-const OUT_CCTV = join(__dirname, "../.cache/cctv-stations.json");
+const CACHE_DIR = join(__dirname, "../.cache");
+const OUT_LIGHTS = join(CACHE_DIR, "security-lights.json");
+const OUT_STORES = join(CACHE_DIR, "convenience-stores.json");
 
 const WFS_URL = "https://www.safemap.go.kr/geoserver_pos/wfs";
 const MAX_FEATURES = 2000;
@@ -21,8 +24,17 @@ const KOREA = { south: 33.0, north: 38.65, west: 124.5, east: 132.1 };
 
 const LAYERS = {
   light: ["A2SM_CMMNPOI_SECULIGHT", "safemap:A2SM_CMMNPOI_SECULIGHT"],
-  cctv: ["A2SM_CCTV_INFO", "safemap:A2SM_CCTV_INFO"],
+  store: ["A2SM_CMMNPOI", "safemap:A2SM_CMMNPOI"],
 };
+
+const STORE_NAME_RE = /편의점|CU|GS25|세븐일레븐|이마트24|미니스톱/i;
+
+const targetArg = process.argv[2]?.trim().toLowerCase();
+const targets = new Set(
+  targetArg && targetArg !== "all"
+    ? [targetArg]
+    : ["lights", "stores"],
+);
 
 const serviceKeyRaw = process.env.SAFEMAP_SERVICE_KEY?.trim() ?? "";
 const serviceKey = serviceKeyRaw.includes("%")
@@ -159,7 +171,14 @@ function featureToFacility(feature, type, defaultName, idPrefix) {
   };
 }
 
-async function collectNationwide(label, typeNames, type, defaultName, idPrefix) {
+function featureToStoreFacility(feature) {
+  const p = feature.properties ?? {};
+  const category = `${p.fclty_ty ?? ""} ${p.fclty_nm ?? ""}`;
+  if (!STORE_NAME_RE.test(category)) return null;
+  return featureToFacility(feature, "store", "편의점", "store");
+}
+
+async function collectNationwide(label, typeNames, mapFeature) {
   const seen = new Map();
   const cells = [...gridCells(KOREA, GRID_STEP)];
   console.log(`\n[${label}] 격자 ${cells.length}칸 수집...`);
@@ -169,7 +188,7 @@ async function collectNationwide(label, typeNames, type, defaultName, idPrefix) 
       const { south, west, north, east } = cells[i];
       const features = await fetchCellRecursive(typeNames, south, west, north, east);
       for (const f of features) {
-        const row = featureToFacility(f, type, defaultName, idPrefix);
+        const row = mapFeature(f);
         if (row) seen.set(row.id, row);
       }
       if ((i + 1) % 10 === 0 || i === cells.length - 1) {
@@ -184,12 +203,24 @@ async function collectNationwide(label, typeNames, type, defaultName, idPrefix) 
   return [...seen.values()];
 }
 
-const lights = await collectNationwide("보안등", LAYERS.light, "light", "보안등", "light");
-const cctv = await collectNationwide("CCTV", LAYERS.cctv, "cctv", "CCTV", "cctv");
+mkdirSync(CACHE_DIR, { recursive: true });
 
-mkdirSync(join(__dirname, "../.cache"), { recursive: true });
-writeFileSync(OUT_LIGHTS, JSON.stringify(lights, null, 2), "utf8");
-writeFileSync(OUT_CCTV, JSON.stringify(cctv, null, 2), "utf8");
+if (targets.has("lights")) {
+  const lights = await collectNationwide(
+    "보안등",
+    LAYERS.light,
+    (f) => featureToFacility(f, "light", "보안등", "light"),
+  );
+  writeFileSync(OUT_LIGHTS, JSON.stringify(lights, null, 2), "utf8");
+  console.log(`\n저장: ${OUT_LIGHTS} (${lights.length}건)`);
+}
 
-console.log(`\n저장: ${OUT_LIGHTS} (${lights.length}건)`);
-console.log(`저장: ${OUT_CCTV} (${cctv.length}건)`);
+if (targets.has("stores")) {
+  const stores = await collectNationwide(
+    "편의점",
+    LAYERS.store,
+    featureToStoreFacility,
+  );
+  writeFileSync(OUT_STORES, JSON.stringify(stores, null, 2), "utf8");
+  console.log(`\n저장: ${OUT_STORES} (${stores.length}건)`);
+}

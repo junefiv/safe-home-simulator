@@ -12,12 +12,14 @@ import {
   LIGHT_RADIUS_M,
   LIGHT_SLOW_FACTOR,
   PLAYER_INVULNERABLE_MS,
+  PLAYER_MARKER_PX,
   PLAYER_MAX_HP,
   PLAYER_SPEED_MPS,
   POLICE_RADIUS_M,
   ZOMBIE_BASE_SPEED_MPS,
   ZOMBIE_COLLISION_DISTANCE_M,
   ZOMBIE_FLEE_SPEED_MULTIPLIER,
+  ZOMBIE_MARKER_PX,
   STORE_FLEE_DURATION_MS,
   STORE_COOLDOWN_MS,
   STORE_GAUGE_FILL_MS,
@@ -96,7 +98,7 @@ export class Player {
     this.lat = lat;
     this.lng = lng;
     this.marker = L.marker([lat, lng], {
-      icon: createEmojiIcon("🏃‍♂️", 40),
+      icon: createEmojiIcon("🏃‍♂️", PLAYER_MARKER_PX),
       zIndexOffset: 1000,
     }).addTo(map);
   }
@@ -214,7 +216,7 @@ export class Zombie {
     this.lng = lng;
     this.movementLayer = movementLayer;
     this.marker = L.marker([lat, lng], {
-      icon: createEmojiIcon("🧟", 35),
+      icon: createEmojiIcon("🧟", ZOMBIE_MARKER_PX),
       zIndexOffset: 500,
     }).addTo(map);
   }
@@ -246,7 +248,7 @@ export class Zombie {
       this.state = "STUNNED";
       this.speed = 0;
       if (previousState !== "STUNNED") {
-        this.marker.setIcon(createEmojiIcon("⚡🧟⚡", 35));
+        this.marker.setIcon(createEmojiIcon("⚡🧟⚡", ZOMBIE_MARKER_PX));
       }
       applyMotionClass(this.marker, "idle");
       this.marker.setOpacity(Math.floor(Date.now() / 120) % 2 === 0 ? 0.45 : 1);
@@ -311,7 +313,7 @@ export class Zombie {
             : this.state === "DISTRACTED"
               ? "❓🧟"
               : "🧟",
-          35,
+          ZOMBIE_MARKER_PX,
         ),
       );
     }

@@ -1,6 +1,10 @@
 export const PLAYER_SPEED_MPS = 8;
 export const PLAYER_MAX_HP = 3;
 export const PLAYER_INVULNERABLE_MS = 2000;
+/** 지도 마커 크기(px) — 도로·건물 대비 사람 비율 */
+export const PLAYER_MARKER_PX = 22;
+/** 건물 충돌 판정 시 캐릭터 발끝 여유(미터) */
+export const PLAYER_FOOTPRINT_M = 0.35;
 
 export const ZOMBIE_BASE_SPEED_MPS = 6;
 export const ZOMBIE_FLEE_SPEED_MULTIPLIER = 1.5;
@@ -8,11 +12,15 @@ export const ZOMBIE_MAX_COUNT = 12;
 export const ZOMBIE_SPAWN_INTERVAL_MS = 4500;
 export const ZOMBIE_SPAWN_MIN_DISTANCE_M = 80;
 export const ZOMBIE_SPAWN_MAX_DISTANCE_M = 150;
-export const ZOMBIE_COLLISION_DISTANCE_M = 3;
+export const ZOMBIE_COLLISION_DISTANCE_M = 1.5;
+/** 지도 마커 크기(px) */
+export const ZOMBIE_MARKER_PX = 20;
 
 export const WIN_DISTANCE_M = 20;
 /** 도로 중심선 허용 반경 기본값(미터) */
 export const ROAD_SEGMENT_TOLERANCE_M = 14;
+/** 건물 폴리곤을 안쪽으로 줄여 캐릭터가 좁은 도로를 지나갈 여유(미터) */
+export const BUILDING_COLLISION_INSET_M = 0.45;
 /** OSM way 끝점이 살짝 떨어져 있을 때 연결(미터) — 건물 밖 도로만 */
 export const ROAD_BRIDGE_MAX_M = 10;
 /** 교차로·코너 여유(미터) — 건물 밖 도로만 */

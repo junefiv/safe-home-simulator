@@ -21,7 +21,16 @@ import {
   createEmojiIcon,
   createHomeIcon,
 } from "@/lib/game/entities";
-import { updateGameLoop } from "@/lib/game/gameLoop";
+import {
+  buildRecommendation,
+  buildSnappedPreviewRoute,
+  buildStraightRoute,
+  countFacilities,
+  routeDistanceM,
+  type FacilityCounts,
+  type LoadingPhase,
+} from "@/lib/game/briefing";
+import { haversineDistance } from "@/lib/game/geo";
 import {
   collectSurroundingPolygons,
   createViewportGrid,
@@ -49,7 +58,7 @@ import {
   type InputState,
   type JoystickVector,
   type LatLng,
-  type MovementLayer,
+  type NormalizedFacility,
   type RoadsData,
 } from "@/lib/game/types";
 import { DestinationIndicator } from "./DestinationIndicator";
@@ -57,6 +66,7 @@ import { EndScreens } from "./EndScreens";
 import { HUD } from "./HUD";
 import { Joystick } from "./Joystick";
 import { MapView } from "./MapView";
+import { RouteLoadingPreview } from "./RouteLoadingPreview";
 import { StartScreen } from "./StartScreen";
 import { Toast } from "./Toast";
 
@@ -76,6 +86,14 @@ function expandBbox(a: LatLng, b: LatLng, padding: number) {
 }
 
 const BUILDING_MAX_RETRIES = 3;
+
+const EMPTY_FACILITY_COUNTS: FacilityCounts = {
+  light: 0,
+  cctv: 0,
+  police: 0,
+  bell: 0,
+  store: 0,
+};
 
 export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const mapRef = useRef<L.Map | null>(null);
@@ -126,11 +144,19 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const [showHud, setShowHud] = useState(false);
   const [showJoystick, setShowJoystick] = useState(false);
   const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
-  const [movementLayer, setMovementLayer] = useState<MovementLayer>("surface");
   const [zombieCount, setZombieCount] = useState(0);
-  const [mapDataLoading, setMapDataLoading] = useState(false);
   const [storeGauge, setStoreGauge] = useState(0);
   const lastStoreGaugeRef = useRef(0);
+
+  const [previewPhase, setPreviewPhase] = useState<LoadingPhase>("init");
+  const [previewStart, setPreviewStart] = useState<LatLng | null>(null);
+  const [previewEnd, setPreviewEnd] = useState<LatLng | null>(null);
+  const [previewRoute, setPreviewRoute] = useState<LatLng[]>([]);
+  const [roadsSnapped, setRoadsSnapped] = useState(false);
+  const [previewFacilities, setPreviewFacilities] = useState<NormalizedFacility[]>([]);
+  const [previewCounts, setPreviewCounts] = useState<FacilityCounts>(EMPTY_FACILITY_COUNTS);
+  const [previewDistanceM, setPreviewDistanceM] = useState(0);
+  const [previewRecommendation, setPreviewRecommendation] = useState("");
 
   const endRef = useRef<LatLng | null>(null);
   const [destination, setDestination] = useState<LatLng | null>(null);
@@ -232,7 +258,6 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       state.loadingKeys.add(key);
       state.inflight += 1;
-      setMapDataLoading(true);
 
       let success = false;
       try {
@@ -262,7 +287,6 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       } finally {
         state.loadingKeys.delete(key);
         state.inflight -= 1;
-        if (state.inflight === 0) setMapDataLoading(false);
       }
 
       return success;
@@ -324,6 +348,111 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
     [loadBuildingCell, syncActiveBlockPolygons],
   );
 
+  const startGameLoop = useCallback(() => {
+    lastTimeRef.current = performance.now();
+    const tick = (timestamp: number) => {
+      if (
+        !playerRef.current ||
+        !endRef.current ||
+        !mapRef.current ||
+        !movementRef.current
+      ) {
+        return;
+      }
+
+      const dt = Math.min(timestamp - lastTimeRef.current, 50);
+      lastTimeRef.current = timestamp;
+      playerBoostTimerRef.current = Math.max(0, playerBoostTimerRef.current - dt);
+
+      const result = updateGameLoop({
+        dt,
+        playing: true,
+        player: playerRef.current,
+        keys: keysRef.current,
+        joystick: joystickRef.current,
+        zombies: zombiesRef.current,
+        facilities: facilitiesRef.current,
+        walkLines: roadsRef.current.walkLines,
+        subwayLines: roadsRef.current.subwayLines,
+        movement: movementRef.current,
+        playerSpeedMultiplier:
+          playerBoostTimerRef.current > 0 ? STORE_PLAYER_SPEED_MULTIPLIER : 1,
+        endLatLng: endRef.current,
+        map: mapRef.current,
+        globalSirenActive: globalSirenRef.current.active,
+        globalSirenTimer: globalSirenRef.current.timer,
+        globalStunActive: globalStunRef.current.active,
+        globalStunTimer: globalStunRef.current.timer,
+        zombieSpawnTimer: zombieSpawnTimerRef.current,
+      });
+
+      zombiesRef.current = result.zombies;
+      globalSirenRef.current = pendingSirenRef.current > 0
+        ? { active: true, timer: pendingSirenRef.current }
+        : { active: result.globalSirenActive, timer: result.globalSirenTimer };
+      globalStunRef.current = pendingStunRef.current > 0
+        ? { active: true, timer: pendingStunRef.current }
+        : { active: result.globalStunActive, timer: result.globalStunTimer };
+      pendingSirenRef.current = 0;
+      pendingStunRef.current = 0;
+      if (pendingPlayerBoostRef.current > 0) {
+        playerBoostTimerRef.current = pendingPlayerBoostRef.current;
+      }
+      pendingPlayerBoostRef.current = 0;
+      zombieSpawnTimerRef.current = result.zombieSpawnTimer;
+
+      if (timestamp - lastHudUpdateRef.current > 200) {
+        lastHudUpdateRef.current = timestamp;
+        setDistToHome(result.distToHome);
+        setSirenActive(
+          globalSirenRef.current.active || globalStunRef.current.active,
+        );
+        setZombieCount(result.zombies.length);
+      }
+
+      let maxGauge = 0;
+      for (const facility of facilitiesRef.current) {
+        if (facility.type === "store" && facility.gaugeProgress > maxGauge) {
+          maxGauge = facility.gaugeProgress;
+        }
+      }
+      if (
+        Math.abs(maxGauge - lastStoreGaugeRef.current) > 0.02 ||
+        (maxGauge > 0) !== (lastStoreGaugeRef.current > 0)
+      ) {
+        lastStoreGaugeRef.current = maxGauge;
+        setStoreGauge(maxGauge);
+      }
+
+      scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
+
+      if (
+        !globalSirenRef.current.active &&
+        !globalStunRef.current.active &&
+        sirenOverlayRef.current
+      ) {
+        sirenOverlayRef.current.remove();
+        sirenOverlayRef.current = null;
+      }
+
+      if (result.victory) {
+        endGame(true);
+        return;
+      }
+
+      loopRef.current = requestAnimationFrame(tick);
+    };
+
+    loopRef.current = requestAnimationFrame(tick);
+  }, [endGame, scheduleViewportBuildingTiles]);
+
+  const beginPlaying = useCallback(() => {
+    setGameState("PLAYING");
+    setShowHud(true);
+    setShowJoystick(window.innerWidth <= 768);
+    startGameLoop();
+  }, [startGameLoop]);
+
   const setupGame = useCallback(
     async (start: GeocodeResult, end: GeocodeResult) => {
       const map = mapRef.current;
@@ -332,12 +461,23 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         return;
       }
 
-      setLoading(true);
-      setLoadingLabel("도로 데이터 로딩 중...");
-      cleanupEntities();
-
       const startLatLng: LatLng = { lat: start.lat, lng: start.lng };
       const endLatLng: LatLng = { lat: end.lat, lng: end.lng };
+      const straightDistance = haversineDistance(startLatLng, endLatLng);
+
+      setLoading(true);
+      setLoadingLabel("도로 데이터 로딩 중...");
+      setPreviewPhase("init");
+      setPreviewStart(startLatLng);
+      setPreviewEnd(endLatLng);
+      setPreviewRoute(buildStraightRoute(startLatLng, endLatLng, 12));
+      setRoadsSnapped(false);
+      setPreviewFacilities([]);
+      setPreviewCounts(EMPTY_FACILITY_COUNTS);
+      setPreviewDistanceM(straightDistance);
+      setPreviewRecommendation("");
+      cleanupEntities();
+
       endRef.current = endLatLng;
       setDestination(endLatLng);
 
@@ -362,37 +502,54 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         (error: unknown) => ({ result: null, error }),
       );
 
+      setPreviewPhase("roads");
+      let routeDistance = straightDistance;
       try {
         roadsRef.current = await fetchRoads(roadsBbox);
         movementRef.current = createMovementResolver(roadsRef.current);
         if (roadsRef.current.walkLines.length === 0) {
           setToast("이동 가능한 도로 데이터가 없습니다. 다시 시도해주세요.");
           setLoading(false);
+          setPreviewPhase("init");
           return;
         }
+        const snapped = buildSnappedPreviewRoute(
+          startLatLng,
+          endLatLng,
+          roadsRef.current.walkLines,
+        );
+        routeDistance = routeDistanceM(snapped) || straightDistance;
+        setPreviewRoute(snapped);
+        setRoadsSnapped(true);
+        setPreviewDistanceM(routeDistance);
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : "도로 데이터를 불러오지 못했습니다. 다시 시도해주세요.";
         setToast(msg.includes("도로") ? msg : `도로 데이터를 불러오지 못했습니다. (${msg})`);
         setLoading(false);
+        setPreviewPhase("init");
         return;
       }
 
-      setLoadingLabel("시설물·전국 파출소 로딩 중...");
-      let facilityData: import("@/lib/game/types").NormalizedFacility[] = [];
+      setPreviewPhase("facilities");
+      setLoadingLabel("주변 안전시설 스캔 중...");
+      let facilityData: NormalizedFacility[] = [];
       try {
         const facilityLoad = await facilityPromise;
         if (facilityLoad.error || !facilityLoad.result) throw facilityLoad.error;
         const facilityResult = facilityLoad.result;
         facilityData = facilityResult.facilities;
+        const counts = countFacilities(facilityData);
+        setPreviewFacilities(facilityData);
+        setPreviewCounts(counts);
+        setPreviewRecommendation(buildRecommendation(routeDistance, counts));
         if (facilityResult.loadReport?.light.error) {
           setToast(facilityResult.loadReport.light.error);
         } else if (facilityResult.loadReport?.light.isMock) {
           setToast("보안등은 API 미연동으로 임시(mock) 데이터입니다.");
         }
-        const policeCount = facilityData.filter((f) => f.type === "police").length;
-        if (policeCount === 0) {
-          setToast("파출소 데이터가 없습니다. ODCLOUD·VWORLD API 키를 확인해주세요.");
+        if (counts.police === 0) {
+          setToast("파출소 데이터가 없습니다. .cache/police-stations.json을 확인해주세요.");
         }
       } catch {
         facilityData = [];
@@ -434,7 +591,8 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       const playZoom = googleMapsApiKey.trim() ? GAME_MAP_ZOOM : VWORLD_MAP_ZOOM;
       map.setView([startPt.lat, startPt.lng], playZoom);
 
-      setLoadingLabel("건물 데이터 로딩 중...");
+      setPreviewPhase("buildings");
+      setLoadingLabel("건물 지형 로딩 중...");
       try {
         buildingFetchRef.current.grid = createViewportGrid(map);
         const startCell = getPlayerGridCell(
@@ -493,115 +651,19 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       });
 
       setHp(PLAYER_MAX_HP);
-      setMovementLayer("surface");
       setZombieCount(0);
-      setGameState("PLAYING");
-      setShowHud(true);
-      setShowJoystick(window.innerWidth <= 768);
+      const finalCounts = countFacilities(facilityData);
+      setPreviewCounts(finalCounts);
+      setPreviewRecommendation(buildRecommendation(routeDistance, finalCounts));
+      setPreviewPhase("ready");
+      setGameState("BRIEFING");
       setLoading(false);
-
-      lastTimeRef.current = performance.now();
-      const tick = (timestamp: number) => {
-        if (
-          !playerRef.current ||
-          !endRef.current ||
-          !mapRef.current ||
-          !movementRef.current
-        ) return;
-
-        // 긴 프레임 뒤 한 번에 크게 이동해 건물을 관통하지 않도록 보정한다.
-        const dt = Math.min(timestamp - lastTimeRef.current, 50);
-        lastTimeRef.current = timestamp;
-        playerBoostTimerRef.current = Math.max(0, playerBoostTimerRef.current - dt);
-
-        const result = updateGameLoop({
-          dt,
-          playing: true,
-          player: playerRef.current,
-          keys: keysRef.current,
-          joystick: joystickRef.current,
-          zombies: zombiesRef.current,
-          facilities: facilitiesRef.current,
-          walkLines: roadsRef.current.walkLines,
-          subwayLines: roadsRef.current.subwayLines,
-          movement: movementRef.current,
-          playerSpeedMultiplier:
-            playerBoostTimerRef.current > 0 ? STORE_PLAYER_SPEED_MULTIPLIER : 1,
-          endLatLng: endRef.current,
-          map: mapRef.current,
-          globalSirenActive: globalSirenRef.current.active,
-          globalSirenTimer: globalSirenRef.current.timer,
-          globalStunActive: globalStunRef.current.active,
-          globalStunTimer: globalStunRef.current.timer,
-          zombieSpawnTimer: zombieSpawnTimerRef.current,
-        });
-
-        zombiesRef.current = result.zombies;
-        globalSirenRef.current = pendingSirenRef.current > 0
-          ? { active: true, timer: pendingSirenRef.current }
-          : { active: result.globalSirenActive, timer: result.globalSirenTimer };
-        globalStunRef.current = pendingStunRef.current > 0
-          ? { active: true, timer: pendingStunRef.current }
-          : { active: result.globalStunActive, timer: result.globalStunTimer };
-        pendingSirenRef.current = 0;
-        pendingStunRef.current = 0;
-        if (pendingPlayerBoostRef.current > 0) {
-          playerBoostTimerRef.current = pendingPlayerBoostRef.current;
-        }
-        pendingPlayerBoostRef.current = 0;
-        zombieSpawnTimerRef.current = result.zombieSpawnTimer;
-
-        if (timestamp - lastHudUpdateRef.current > 200) {
-          lastHudUpdateRef.current = timestamp;
-          setDistToHome(result.distToHome);
-          setSirenActive(
-            globalSirenRef.current.active || globalStunRef.current.active,
-          );
-          setMovementLayer(playerRef.current.movementLayer);
-          setZombieCount(result.zombies.length);
-        }
-
-        let maxGauge = 0;
-        for (const facility of facilitiesRef.current) {
-          if (facility.type === "store" && facility.gaugeProgress > maxGauge) {
-            maxGauge = facility.gaugeProgress;
-          }
-        }
-        if (
-          Math.abs(maxGauge - lastStoreGaugeRef.current) > 0.02 ||
-          (maxGauge > 0) !== (lastStoreGaugeRef.current > 0)
-        ) {
-          lastStoreGaugeRef.current = maxGauge;
-          setStoreGauge(maxGauge);
-        }
-
-        scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
-
-        if (
-          !globalSirenRef.current.active &&
-          !globalStunRef.current.active &&
-          sirenOverlayRef.current
-        ) {
-          sirenOverlayRef.current.remove();
-          sirenOverlayRef.current = null;
-        }
-
-        if (result.victory) {
-          endGame(true);
-          return;
-        }
-
-        loopRef.current = requestAnimationFrame(tick);
-      };
-
-      loopRef.current = requestAnimationFrame(tick);
     },
     [
       cleanupEntities,
       endGame,
       googleMapsApiKey,
       loadBuildingCell,
-      scheduleViewportBuildingTiles,
       syncActiveBlockPolygons,
     ],
   );
@@ -661,9 +723,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
           maxHp={PLAYER_MAX_HP}
           distToHome={distToHome}
           sirenActive={sirenActive}
-          movementLayer={movementLayer}
           zombieCount={zombieCount}
-          mapDataLoading={mapDataLoading}
         />
       )}
       <DestinationIndicator
@@ -691,11 +751,26 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         }}
       />
       <StartScreen
-        visible={gameState === "SETUP"}
+        visible={gameState === "SETUP" && !loading}
         loading={loading}
         loadingLabel={loadingLabel}
         onStart={setupGame}
         onToast={setToast}
+      />
+      <RouteLoadingPreview
+        visible={loading || gameState === "BRIEFING"}
+        ready={gameState === "BRIEFING"}
+        phase={previewPhase}
+        loadingLabel={loadingLabel}
+        start={previewStart}
+        end={previewEnd}
+        routePoints={previewRoute}
+        roadsSnapped={roadsSnapped}
+        facilities={previewFacilities}
+        counts={previewCounts}
+        distanceM={previewDistanceM}
+        recommendation={previewRecommendation}
+        onBegin={beginPlaying}
       />
       <EndScreens
         gameState={gameState === "GAMEOVER" || gameState === "VICTORY" ? gameState : null}
