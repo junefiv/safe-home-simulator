@@ -71,9 +71,6 @@ export async function fetchFacilities(bbox: Bbox): Promise<FacilitiesFetchResult
     policeCount?: number;
     policeError?: string;
   };
-  if ((data.policeCount ?? 0) === 0 && data.policeError) {
-    throw new Error(data.policeError);
-  }
   if (data.loadReport) {
     logFacilitiesLoadReport(data.loadReport);
   }

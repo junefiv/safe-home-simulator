@@ -53,6 +53,9 @@ export interface NormalizedFacility {
   lng: number;
   name?: string;
   address?: string;
+  /** 겹치는 마커 좌우 분리용 (게임·미리보기 표시만) */
+  displayLat?: number;
+  displayLng?: number;
 }
 
 export interface RoadsData {

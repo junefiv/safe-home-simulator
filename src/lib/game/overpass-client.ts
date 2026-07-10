@@ -14,11 +14,23 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
-/** 도로·역만 조회 (건물은 별도 API) */
-export function buildRoadsOverpassQuery(bbox: string): string {
-  return `[out:json][timeout:25];
+export function buildSubwayOverpassQuery(bbox: string): string {
+  return `[out:json][timeout:12];
 (
-  way["highway"](${bbox});
+  way["railway"="subway"](${bbox});
+  way["building"="train_station"](${bbox});
+  way["railway"="station"](${bbox});
+  way["public_transport"="station"](${bbox});
+  way["station"="subway"](${bbox});
+  node["railway"~"^(station|subway_entrance)$"](${bbox});
+);
+out geom;`;
+}
+
+export function buildRoadsOverpassQuery(bbox: string): string {
+  return `[out:json][timeout:8];
+(
+  way["highway"~"^(footway|path|pedestrian|steps|living_street|service|residential|unclassified|tertiary|tertiary_link|road)$"](${bbox});
   way["railway"="subway"](${bbox});
   way["building"="train_station"](${bbox});
   way["railway"="station"](${bbox});
@@ -26,13 +38,11 @@ export function buildRoadsOverpassQuery(bbox: string): string {
   way["station"="subway"](${bbox});
   way["public_transport"="platform"]["subway"="yes"](${bbox});
   node["railway"~"^(station|subway_entrance)$"](${bbox});
-  way["landuse"="residential"]["residential"~"^(apartment|apartments)$",i](${bbox});
-  way["landuse"="residential"]["name"~"(아파트|APT|Apartment)",i](${bbox});
+  way["landuse"="residential"]["residential"~"^(apartment|apartments)$"](${bbox});
 );
 out geom;`;
 }
 
-/** 단일 way + multipolygon relation 건물 */
 export function buildBuildingsOverpassQuery(bbox: string): string {
   return `[out:json][timeout:40];
 (
@@ -46,7 +56,7 @@ export async function fetchOverpassJson(
   query: string,
   timeoutMs = 28_000,
 ): Promise<{ elements?: unknown[] }> {
-  let lastError = "Overpass API를 사용할 수 없습니다";
+  let lastError = "Overpass API is unavailable";
 
   for (const server of OVERPASS_SERVERS) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -78,6 +88,39 @@ export async function fetchOverpassJson(
         lastError = err instanceof Error ? err.message : "Overpass fetch failed";
         await sleep(600 * (attempt + 1));
       }
+    }
+  }
+
+  throw new Error(lastError);
+}
+
+export async function fetchOverpassJsonFast(
+  query: string,
+  timeoutMs = 8_000,
+): Promise<{ elements?: unknown[] }> {
+  let lastError = "Overpass fast fetch failed";
+
+  for (const server of OVERPASS_SERVERS) {
+    try {
+      const res = await fetch(server, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": USER_AGENT,
+        },
+        body: `data=${encodeURIComponent(query)}`,
+        cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!res.ok) {
+        lastError = `Overpass HTTP ${res.status} (${server})`;
+        continue;
+      }
+
+      return (await res.json()) as { elements?: unknown[] };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : "Overpass fast fetch failed";
     }
   }
 

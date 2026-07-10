@@ -4,16 +4,13 @@ import L from "leaflet";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBuildings, fetchFacilities, fetchRoads } from "@/lib/api-client";
 import {
-  BUILDING_MAX_CONCURRENT,
+  BUILDING_LOOKAHEAD_RATIO,
   BUILDING_TILE_CHECK_MS,
-  FACILITIES_BBOX_PADDING,
-  GAME_MAP_ZOOM,
-  VWORLD_MAP_ZOOM,
   PLAYER_MAX_HP,
   ROADS_BOUNDS_PADDING,
   STORE_PLAYER_SPEED_MULTIPLIER,
+  VWORLD_MAP_ZOOM,
 } from "@/lib/game/constants";
-import { wrapPolygons, type BlockPolygon } from "@/lib/game/blockPolygon";
 import {
   GameFacility,
   Player,
@@ -25,35 +22,37 @@ import {
   buildRecommendation,
   buildSnappedPreviewRoute,
   buildStraightRoute,
+  bboxAlongRoute,
   countFacilities,
+  filterFacilitiesAlongRoute,
+  layoutColocatedFacilityMarkers,
   routeDistanceM,
   type FacilityCounts,
   type LoadingPhase,
 } from "@/lib/game/briefing";
 import { haversineDistance } from "@/lib/game/geo";
-import {
-  collectSurroundingPolygons,
-  createViewportGrid,
-  getPlayerGridCell,
-  getSurroundingCells,
-  gridCellToBbox,
-  isSameCell,
-  pruneTileStore,
-  sleep,
-  type GridCell,
-  type ViewportGrid,
-} from "@/lib/game/viewportTiles";
-import { cellStorageKey } from "@/lib/game/blockPolygon";
+import { updateGameLoop } from "@/lib/game/gameLoop";
+import { cellStorageKey, wrapPolygons } from "@/lib/game/blockPolygon";
 import {
   createMovementResolver,
-  createPositionValidator,
   getNearestValidPoint,
   type MovementResolver,
 } from "@/lib/game/roadValidation";
 import {
+  collectSurroundingPolygons,
+  createViewportGrid,
+  getBuildingFetchBbox,
+  getPlayerGridCell,
+  getSurroundBbox,
+  getSurroundingCells,
+  isSameCell,
+  pruneTileStore,
+  type GridCell,
+  type ViewportGrid,
+} from "@/lib/game/viewportTiles";
+import {
   INITIAL_INPUT_STATE,
   type GameState,
-  type Bbox,
   type GeocodeResult,
   type InputState,
   type JoystickVector,
@@ -70,23 +69,6 @@ import { RouteLoadingPreview } from "./RouteLoadingPreview";
 import { StartScreen } from "./StartScreen";
 import { Toast } from "./Toast";
 
-function expandBbox(a: LatLng, b: LatLng, padding: number) {
-  const south = Math.min(a.lat, b.lat);
-  const north = Math.max(a.lat, b.lat);
-  const west = Math.min(a.lng, b.lng);
-  const east = Math.max(a.lng, b.lng);
-  const latPad = (north - south) * padding;
-  const lngPad = (east - west) * padding;
-  return {
-    south: south - latPad,
-    north: north + latPad,
-    west: west - lngPad,
-    east: east + lngPad,
-  };
-}
-
-const BUILDING_MAX_RETRIES = 3;
-
 const EMPTY_FACILITY_COUNTS: FacilityCounts = {
   light: 0,
   cctv: 0,
@@ -95,7 +77,52 @@ const EMPTY_FACILITY_COUNTS: FacilityCounts = {
   store: 0,
 };
 
-export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
+function walkLineKey(line: RoadsData["walkLines"][number]): string {
+  return [
+    line.p1.lat.toFixed(6),
+    line.p1.lng.toFixed(6),
+    line.p2.lat.toFixed(6),
+    line.p2.lng.toFixed(6),
+    Math.round(line.maxDistM),
+    line.highway ?? "",
+  ].join("|");
+}
+
+function mergeWalkLines(
+  existing: RoadsData["walkLines"],
+  incoming: RoadsData["walkLines"],
+): RoadsData["walkLines"] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set(existing.map(walkLineKey));
+  const merged = [...existing];
+  for (const line of incoming) {
+    const key = walkLineKey(line);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(line);
+  }
+  return merged;
+}
+
+function mergePolygons(existing: LatLng[][], incoming: LatLng[][]): LatLng[][] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set(
+    existing.map((poly) =>
+      `${poly[0]?.lat.toFixed(6)}|${poly[0]?.lng.toFixed(6)}|${poly.length}`,
+    ),
+  );
+  const merged = [...existing];
+  for (const poly of incoming) {
+    if (poly.length < 3) continue;
+    const key = `${poly[0].lat.toFixed(6)}|${poly[0].lng.toFixed(6)}|${poly.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(poly);
+  }
+  return merged;
+}
+
+export function Game() {
   const mapRef = useRef<L.Map | null>(null);
   const playerRef = useRef<Player | null>(null);
   const zombiesRef = useRef<Zombie[]>([]);
@@ -121,18 +148,15 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const playerBoostTimerRef = useRef(0);
   const pendingPlayerBoostRef = useRef(0);
   const zombieSpawnTimerRef = useRef(0);
-  const buildingFetchRef = useRef({
-    grid: null as ViewportGrid | null,
-    tileStore: new Map<string, BlockPolygon[]>(),
-    loadedCells: new Set<string>(),
-    loadingKeys: new Set<string>(),
-    retryCounts: new Map<string, number>(),
-    coverageStore: new Map<string, Bbox>(),
-    inflight: 0,
-    lastCell: null as GridCell | null,
-    lastCheckMs: 0,
-  });
   const lastHudUpdateRef = useRef(0);
+  const viewportGridRef = useRef<ViewportGrid | null>(null);
+  const lastRuntimeCellRef = useRef<GridCell | null>(null);
+  const loadedRuntimeCellsRef = useRef<Set<string>>(new Set());
+  const loadingRuntimeCellsRef = useRef<Set<string>>(new Set());
+  const facilityIdsRef = useRef<Set<string>>(new Set());
+  const buildingTileStoreRef = useRef<Map<string, ReturnType<typeof wrapPolygons>>>(
+    new Map(),
+  );
 
   const [gameState, setGameState] = useState<GameState>("SETUP");
   const [toast, setToast] = useState<string | null>(null);
@@ -177,24 +201,37 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
     startMarkersRef.current = [];
     zombieSpawnTimerRef.current = 0;
     movementRef.current = null;
-    buildingFetchRef.current = {
-      grid: null,
-      tileStore: new Map(),
-      loadedCells: new Set(),
-      loadingKeys: new Set(),
-      retryCounts: new Map(),
-      coverageStore: new Map(),
-      inflight: 0,
-      lastCell: null,
-      lastCheckMs: 0,
-    };
     globalSirenRef.current = { active: false, timer: 0 };
     globalStunRef.current = { active: false, timer: 0 };
     pendingSirenRef.current = 0;
     pendingStunRef.current = 0;
     playerBoostTimerRef.current = 0;
     pendingPlayerBoostRef.current = 0;
+    viewportGridRef.current = null;
+    lastRuntimeCellRef.current = null;
+    loadedRuntimeCellsRef.current = new Set();
+    loadingRuntimeCellsRef.current = new Set();
+    facilityIdsRef.current = new Set();
+    buildingTileStoreRef.current = new Map();
   }, []);
+
+  const createFacilityCallbacks = useCallback(
+    () => ({
+      onToast: (msg: string) => setToast(msg),
+      onBellStun: (durationMs: number) => {
+        pendingStunRef.current = Math.max(pendingStunRef.current, durationMs);
+        setSirenActive(true);
+      },
+      onStoreBoost: (durationMs: number) => {
+        pendingPlayerBoostRef.current = Math.max(
+          pendingPlayerBoostRef.current,
+          durationMs,
+        );
+      },
+      onPoliceRest: () => playerRef.current?.heal(1),
+    }),
+    [],
+  );
 
   const endGame = useCallback(
     (victory: boolean) => {
@@ -222,130 +259,6 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
   const getPlayerPosition = useCallback(
     (): LatLng | null => playerRef.current?.latlng ?? null,
     [],
-  );
-
-  const syncActiveBlockPolygons = useCallback((cell: GridCell) => {
-    const state = buildingFetchRef.current;
-    pruneTileStore(state.tileStore, cell);
-    for (const key of [...state.loadedCells]) {
-      const [row, col] = key.split(":").map(Number);
-      if (Math.abs(row - cell.row) > 2 || Math.abs(col - cell.col) > 2) {
-        state.loadedCells.delete(key);
-        state.retryCounts.delete(key);
-        state.coverageStore.delete(key);
-      }
-    }
-    roadsRef.current.blockPolygons = collectSurroundingPolygons(cell, state.tileStore);
-    roadsRef.current.buildingCoverage = getSurroundingCells(cell)
-      .map((nearby) => state.coverageStore.get(cellStorageKey(nearby.row, nearby.col)))
-      .filter((bbox): bbox is Bbox => Boolean(bbox));
-  }, []);
-
-  const loadBuildingCell = useCallback(
-    async (cell: GridCell, options?: { priority?: boolean }): Promise<boolean> => {
-      const state = buildingFetchRef.current;
-      if (!state.grid) return false;
-
-      const key = cellStorageKey(cell.row, cell.col);
-      if (state.loadedCells.has(key)) return true;
-      if (state.loadingKeys.has(key)) return false;
-
-      const priority = options?.priority ?? false;
-      while (!priority && state.inflight >= BUILDING_MAX_CONCURRENT) {
-        await sleep(80);
-        if (state.loadedCells.has(key)) return true;
-      }
-
-      state.loadingKeys.add(key);
-      state.inflight += 1;
-
-      let success = false;
-      try {
-        const rawBbox = gridCellToBbox(cell, state.grid);
-        const latPad = (rawBbox.north - rawBbox.south) * 0.12;
-        const lngPad = (rawBbox.east - rawBbox.west) * 0.12;
-        const bbox = {
-          south: rawBbox.south - latPad,
-          north: rawBbox.north + latPad,
-          west: rawBbox.west - lngPad,
-          east: rawBbox.east + lngPad,
-        };
-        const raw = await fetchBuildings(bbox);
-        const wrapped = wrapPolygons(raw);
-
-        state.tileStore.set(key, wrapped);
-        state.coverageStore.set(key, bbox);
-        state.loadedCells.add(key);
-        state.retryCounts.delete(key);
-        success = true;
-        if (state.lastCell) {
-          syncActiveBlockPolygons(state.lastCell);
-        }
-      } catch {
-        const retries = (state.retryCounts.get(key) ?? 0) + 1;
-        state.retryCounts.set(key, retries);
-      } finally {
-        state.loadingKeys.delete(key);
-        state.inflight -= 1;
-      }
-
-      return success;
-    },
-    [syncActiveBlockPolygons],
-  );
-
-  const scheduleViewportBuildingTiles = useCallback(
-    (lat: number, lng: number) => {
-      const map = mapRef.current;
-      if (!map) return;
-
-      const state = buildingFetchRef.current;
-      const now = performance.now();
-      if (now - state.lastCheckMs < BUILDING_TILE_CHECK_MS) return;
-      state.lastCheckMs = now;
-
-      if (!state.grid) {
-        state.grid = createViewportGrid(map);
-      }
-
-      const cell = getPlayerGridCell(lat, lng, state.grid);
-      const cellChanged = !isSameCell(state.lastCell, cell);
-
-      if (cellChanged) {
-        state.lastCell = cell;
-        syncActiveBlockPolygons(cell);
-      }
-
-      const key = cellStorageKey(cell.row, cell.col);
-      const retries = state.retryCounts.get(key) ?? 0;
-      const needsLoad =
-        !state.loadedCells.has(key) &&
-        !state.loadingKeys.has(key) &&
-        retries < BUILDING_MAX_RETRIES;
-
-      if (needsLoad || (cellChanged && retries > 0 && retries < BUILDING_MAX_RETRIES)) {
-        void loadBuildingCell(cell);
-      }
-
-      if (cellChanged) {
-        const neighbors = [
-          { row: cell.row - 1, col: cell.col },
-          { row: cell.row + 1, col: cell.col },
-          { row: cell.row, col: cell.col - 1 },
-          { row: cell.row, col: cell.col + 1 },
-        ];
-        const prefetch = () => {
-          for (const neighbor of neighbors) void loadBuildingCell(neighbor);
-        };
-        const requestIdle = window.requestIdleCallback;
-        if (typeof requestIdle === "function") {
-          requestIdle(prefetch, { timeout: 1200 });
-        } else {
-          globalThis.setTimeout(prefetch, 250);
-        }
-      }
-    },
-    [loadBuildingCell, syncActiveBlockPolygons],
   );
 
   const startGameLoop = useCallback(() => {
@@ -424,8 +337,6 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         setStoreGauge(maxGauge);
       }
 
-      scheduleViewportBuildingTiles(playerRef.current.lat, playerRef.current.lng);
-
       if (
         !globalSirenRef.current.active &&
         !globalStunRef.current.active &&
@@ -444,7 +355,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
     };
 
     loopRef.current = requestAnimationFrame(tick);
-  }, [endGame, scheduleViewportBuildingTiles]);
+  }, [endGame]);
 
   const beginPlaying = useCallback(() => {
     setGameState("PLAYING");
@@ -492,18 +403,10 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
         north: padded.getNorth(),
         east: padded.getEast(),
       };
-      const facilityBbox = expandBbox(
-        startLatLng,
-        endLatLng,
-        FACILITIES_BBOX_PADDING,
-      );
-      const facilityPromise = fetchFacilities(facilityBbox).then(
-        (result) => ({ result, error: null as unknown }),
-        (error: unknown) => ({ result: null, error }),
-      );
 
       setPreviewPhase("roads");
       let routeDistance = straightDistance;
+      let snapped = buildStraightRoute(startLatLng, endLatLng, 12);
       try {
         roadsRef.current = await fetchRoads(roadsBbox);
         movementRef.current = createMovementResolver(roadsRef.current);
@@ -513,7 +416,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
           setPreviewPhase("init");
           return;
         }
-        const snapped = buildSnappedPreviewRoute(
+        snapped = buildSnappedPreviewRoute(
           startLatLng,
           endLatLng,
           roadsRef.current.walkLines,
@@ -533,14 +436,14 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       setPreviewPhase("facilities");
       setLoadingLabel("주변 안전시설 스캔 중...");
-      let facilityData: NormalizedFacility[] = [];
+      let briefingFacilities: NormalizedFacility[] = [];
+      let gameFacilities: NormalizedFacility[] = [];
       try {
-        const facilityLoad = await facilityPromise;
-        if (facilityLoad.error || !facilityLoad.result) throw facilityLoad.error;
-        const facilityResult = facilityLoad.result;
-        facilityData = facilityResult.facilities;
-        const counts = countFacilities(facilityData);
-        setPreviewFacilities(facilityData);
+        const facilityResult = await fetchFacilities(bboxAlongRoute(snapped));
+        gameFacilities = layoutColocatedFacilityMarkers(facilityResult.facilities);
+        briefingFacilities = filterFacilitiesAlongRoute(gameFacilities, snapped);
+        const counts = countFacilities(briefingFacilities);
+        setPreviewFacilities(briefingFacilities);
         setPreviewCounts(counts);
         setPreviewRecommendation(buildRecommendation(routeDistance, counts));
         if (facilityResult.loadReport?.light.error) {
@@ -549,11 +452,33 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
           setToast("보안등은 API 미연동으로 임시(mock) 데이터입니다.");
         }
         if (counts.police === 0) {
-          setToast("파출소 데이터가 없습니다. .cache/police-stations.json을 확인해주세요.");
+          const policeInBbox = facilityResult.loadReport?.police.inBbox ?? 0;
+          if (facilityResult.loadReport?.police.error) {
+            setToast(facilityResult.loadReport.police.error);
+          } else if (policeInBbox === 0) {
+            setToast("이 귀가 경로 근처에 파출소·지구대가 없습니다.");
+          }
         }
       } catch {
-        facilityData = [];
+        briefingFacilities = [];
+        gameFacilities = [];
         setToast("시설물 데이터 로딩에 실패했습니다.");
+      }
+
+      setPreviewPhase("buildings");
+      setLoadingLabel("嫄대Ъ 異⑸룎 ?곗씠??濡쒕뵫 以?..");
+      try {
+        const initialBuildings = await fetchBuildings(roadsBbox);
+        roadsRef.current = {
+          ...roadsRef.current,
+          blockPolygons: wrapPolygons(initialBuildings),
+        };
+        movementRef.current = createMovementResolver(roadsRef.current);
+      } catch (err) {
+        console.warn(
+          "[buildings] 초기 건물 데이터 로드 실패:",
+          err instanceof Error ? err.message : err,
+        );
       }
 
       const startMarker = L.marker([startLatLng.lat, startLatLng.lng], {
@@ -578,69 +503,25 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
       }).addTo(map);
       startMarkersRef.current = [startMarker, endMarker, endPulse];
 
-      const isValid = createPositionValidator(roadsRef.current);
       const startPt = getNearestValidPoint(
         startLatLng.lat,
         startLatLng.lng,
         roadsRef.current.walkLines,
       );
-      if (!isValid(startPt.lat, startPt.lng) && roadsRef.current.walkLines.length > 0) {
-        Object.assign(startPt, getNearestValidPoint(startPt.lat, startPt.lng, roadsRef.current.walkLines));
-      }
 
-      const playZoom = googleMapsApiKey.trim() ? GAME_MAP_ZOOM : VWORLD_MAP_ZOOM;
-      map.setView([startPt.lat, startPt.lng], playZoom);
+      map.setView([startPt.lat, startPt.lng], VWORLD_MAP_ZOOM);
 
-      setPreviewPhase("buildings");
-      setLoadingLabel("건물 지형 로딩 중...");
-      try {
-        buildingFetchRef.current.grid = createViewportGrid(map);
-        const startCell = getPlayerGridCell(
-          startPt.lat,
-          startPt.lng,
-          buildingFetchRef.current.grid,
-        );
-        buildingFetchRef.current.lastCell = startCell;
-        for (let attempt = 0; attempt < BUILDING_MAX_RETRIES; attempt += 1) {
-          const ok = await loadBuildingCell(startCell, { priority: true });
-          if (ok) break;
-          await sleep(400);
-        }
-        syncActiveBlockPolygons(startCell);
-      } catch {
-        // 건물 없이도 진행
-      }
+      const facilityCallbacks = createFacilityCallbacks();
 
-      const facilityCallbacks = {
-        onToast: (msg: string) => setToast(msg),
-        onBellStun: (durationMs: number) => {
-          pendingStunRef.current = Math.max(pendingStunRef.current, durationMs);
-          setSirenActive(true);
-        },
-        onStoreFlee: (durationMs: number) => {
-          pendingSirenRef.current = Math.max(pendingSirenRef.current, durationMs);
-          pendingPlayerBoostRef.current = Math.max(
-            pendingPlayerBoostRef.current,
-            durationMs,
-          );
-          setSirenActive(true);
-          if (!sirenOverlayRef.current) {
-            const overlay = document.createElement("div");
-            overlay.className =
-              "fixed inset-0 border-[10px] border-red-500/50 pointer-events-none z-[2000] animate-pulse";
-            document.body.appendChild(overlay);
-            sirenOverlayRef.current = overlay;
-          }
-        },
-        onPoliceRest: () => playerRef.current?.heal(1),
-      };
-
-      facilitiesRef.current = facilityData.map(
+      facilitiesRef.current = gameFacilities.map(
         (f) =>
           new GameFacility(f, map, {
             ...facilityCallbacks,
           }),
       );
+      facilityIdsRef.current = new Set(gameFacilities.map((f) => f.id));
+      viewportGridRef.current = createViewportGrid(map);
+      lastRuntimeCellRef.current = null;
 
       playerRef.current = new Player(startPt.lat, startPt.lng, map, {
         onDamage: () => setToast("좀비에게 공격당했습니다!"),
@@ -652,21 +533,152 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
       setHp(PLAYER_MAX_HP);
       setZombieCount(0);
-      const finalCounts = countFacilities(facilityData);
-      setPreviewCounts(finalCounts);
-      setPreviewRecommendation(buildRecommendation(routeDistance, finalCounts));
+      setPreviewCounts(countFacilities(briefingFacilities));
+      setPreviewRecommendation(
+        buildRecommendation(routeDistance, countFacilities(briefingFacilities)),
+      );
       setPreviewPhase("ready");
       setGameState("BRIEFING");
       setLoading(false);
     },
-    [
-      cleanupEntities,
-      endGame,
-      googleMapsApiKey,
-      loadBuildingCell,
-      syncActiveBlockPolygons,
-    ],
+    [cleanupEntities, createFacilityCallbacks, endGame],
   );
+
+  useEffect(() => {
+    if (gameState !== "PLAYING") return;
+
+    let cancelled = false;
+
+    const loadRuntimeCell = async (cell: GridCell, grid: ViewportGrid) => {
+      const centerKey = cellStorageKey(cell.row, cell.col);
+      if (
+        loadedRuntimeCellsRef.current.has(centerKey) ||
+        loadingRuntimeCellsRef.current.has(centerKey)
+      ) {
+        return;
+      }
+
+      const cells = getSurroundingCells(cell);
+      const missingCells = cells.filter((candidate) => {
+        const key = cellStorageKey(candidate.row, candidate.col);
+        return (
+          !loadedRuntimeCellsRef.current.has(key) &&
+          !loadingRuntimeCellsRef.current.has(key)
+        );
+      });
+      loadingRuntimeCellsRef.current.add(centerKey);
+      for (const candidate of missingCells) {
+        loadingRuntimeCellsRef.current.add(cellStorageKey(candidate.row, candidate.col));
+      }
+
+      try {
+        const surroundBbox = getSurroundBbox(cell, grid);
+        const [roads, facilityResult] = await Promise.all([
+          fetchRoads(surroundBbox),
+          fetchFacilities(surroundBbox),
+        ]);
+
+        if (cancelled) return;
+
+        const currentRoads = roadsRef.current;
+        const stationPolygons = mergePolygons(
+          currentRoads.stationPolygons,
+          roads.stationPolygons ?? [],
+        );
+        const walkPolygons = mergePolygons(
+          currentRoads.walkPolygons,
+          roads.walkPolygons ?? roads.stationPolygons ?? [],
+        );
+        roadsRef.current = {
+          ...currentRoads,
+          walkLines: mergeWalkLines(currentRoads.walkLines, roads.walkLines),
+          subwayLines: mergeWalkLines(
+            currentRoads.subwayLines,
+            roads.subwayLines ?? [],
+          ),
+          stationPolygons,
+          walkPolygons,
+          apartmentPolygons: [],
+        };
+
+        const map = mapRef.current;
+        if (map) {
+          const callbacks = createFacilityCallbacks();
+          const newFacilities = layoutColocatedFacilityMarkers(
+            facilityResult.facilities.filter((facility) => {
+              if (facilityIdsRef.current.has(facility.id)) return false;
+              facilityIdsRef.current.add(facility.id);
+              return true;
+            }),
+          ).map((facility) => new GameFacility(facility, map, callbacks));
+          if (newFacilities.length > 0) {
+            facilitiesRef.current = [...facilitiesRef.current, ...newFacilities];
+          }
+        }
+
+        const buildingResults = await Promise.all(
+          missingCells.map(async (candidate) => {
+            const bbox = getBuildingFetchBbox(candidate, grid, BUILDING_LOOKAHEAD_RATIO);
+            const polygons = await fetchBuildings(bbox);
+            return { key: cellStorageKey(candidate.row, candidate.col), polygons };
+          }),
+        );
+
+        if (cancelled) return;
+
+        for (const result of buildingResults) {
+          buildingTileStoreRef.current.set(result.key, wrapPolygons(result.polygons));
+        }
+        roadsRef.current = {
+          ...roadsRef.current,
+          blockPolygons: collectSurroundingPolygons(
+            cell,
+            buildingTileStoreRef.current,
+          ),
+        };
+        pruneTileStore(buildingTileStoreRef.current, cell);
+        movementRef.current = createMovementResolver(roadsRef.current);
+
+        for (const candidate of cells) {
+          loadedRuntimeCellsRef.current.add(cellStorageKey(candidate.row, candidate.col));
+        }
+      } catch (err) {
+        console.warn(
+          "[runtime-map] 주변 데이터 로드 실패:",
+          err instanceof Error ? err.message : err,
+        );
+      } finally {
+        loadingRuntimeCellsRef.current.delete(centerKey);
+        for (const candidate of missingCells) {
+          loadingRuntimeCellsRef.current.delete(
+            cellStorageKey(candidate.row, candidate.col),
+          );
+        }
+      }
+    };
+
+    const interval = window.setInterval(() => {
+      const player = playerRef.current;
+      const map = mapRef.current;
+      if (!player || !map) return;
+
+      let grid = viewportGridRef.current;
+      if (!grid) {
+        grid = createViewportGrid(map);
+        viewportGridRef.current = grid;
+      }
+
+      const cell = getPlayerGridCell(player.lat, player.lng, grid);
+      if (isSameCell(lastRuntimeCellRef.current, cell)) return;
+      lastRuntimeCellRef.current = cell;
+      void loadRuntimeCell(cell, grid);
+    }, BUILDING_TILE_CHECK_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [createFacilityCallbacks, gameState]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -711,11 +723,7 @@ export function Game({ googleMapsApiKey = "" }: { googleMapsApiKey?: string }) {
 
   return (
     <div className="game-root">
-      <MapView
-        center={[37.5665, 126.978]}
-        googleMapsApiKey={googleMapsApiKey}
-        onMapReady={handleMapReady}
-      />
+      <MapView center={[37.5665, 126.978]} onMapReady={handleMapReady} />
       <Toast message={toast} onClear={() => setToast(null)} />
       {showHud && (
         <HUD

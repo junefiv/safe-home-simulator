@@ -2,6 +2,7 @@ import type { BlockPolygon } from "./blockPolygon";
 import { wrapPolygons } from "./blockPolygon";
 import {
   ROAD_BRIDGE_MAX_M,
+  ROAD_BUILDING_OVERLAP_SLACK_M,
   ROAD_JUNCTION_SLACK_M,
   ROAD_SEGMENT_TOLERANCE_M,
   ROAD_STRICT_ENDPOINT_SLACK_M,
@@ -78,6 +79,8 @@ interface RoadMatchOptions {
   /** false면 OSM 원본 세그먼트만 (건물 안 판정용) */
   includeBridges?: boolean;
   endpointSlackM?: number;
+  /** 건물 폴리곤과 겹치는 도로 구간 — 허용 반경을 넓힘 */
+  buildingOverlap?: boolean;
 }
 
 function matchWalkRoadOnLines(
@@ -89,6 +92,7 @@ function matchWalkRoadOnLines(
 ): RoadMatch {
   const includeBridges = options.includeBridges ?? true;
   const endpointSlackM = options.endpointSlackM ?? ROAD_JUNCTION_SLACK_M;
+  const widthSlackM = options.buildingOverlap ? ROAD_BUILDING_OVERLAP_SLACK_M : 0;
 
   for (const line of nearbyWalkLines(lat, lng, walkLines)) {
     if (!includeBridges && line.isBridge) continue;
@@ -96,12 +100,12 @@ function matchWalkRoadOnLines(
     if (lat < line.minLat || lat > line.maxLat || lng < line.minLng || lng > line.maxLng) {
       continue;
     }
-    if (distanceToSegment(pt, line.p1, line.p2) <= line.maxDistM) {
+    if (distanceToSegment(pt, line.p1, line.p2) <= line.maxDistM + widthSlackM) {
       const major = isMajorHighway(line.highway) || line.maxDistM >= 28;
       return { onRoad: true, major };
     }
     if (endpointSlackM > 0) {
-      const endSlack = line.maxDistM + endpointSlackM;
+      const endSlack = line.maxDistM + endpointSlackM + widthSlackM;
       if (
         haversineDistance(pt, line.p1) <= endSlack ||
         haversineDistance(pt, line.p2) <= endSlack
@@ -219,10 +223,15 @@ function nearbyWalkLines(lat: number, lng: number, walkLines: WalkLine[]): WalkL
   return getRoadIndex(walkLines).get(key) ?? [];
 }
 
-function isOnWalkRoad(point: LatLng, walkLines: WalkLine[]): boolean {
+function isOnWalkRoad(
+  point: LatLng,
+  walkLines: WalkLine[],
+  buildingOverlap = false,
+): boolean {
   return matchWalkRoadOnLines(point, point.lat, point.lng, walkLines, {
     includeBridges: true,
-    endpointSlackM: ROAD_STRICT_ENDPOINT_SLACK_M,
+    endpointSlackM: ROAD_JUNCTION_SLACK_M,
+    buildingOverlap,
   }).onRoad;
 }
 
@@ -300,7 +309,7 @@ interface RoadEndpoint {
 }
 
 /** OSM way 끝점이 1~16m 떨어진 곳을 잇는 보조 세그먼트 (교차로·타일 경계 끊김 완화) */
-function bridgeRoadGaps(walkLines: WalkLine[]): WalkLine[] {
+export function bridgeRoadGaps(walkLines: WalkLine[]): WalkLine[] {
   const endpoints: RoadEndpoint[] = [];
   for (const line of walkLines) {
     endpoints.push({ pt: line.p1, maxDistM: line.maxDistM, highway: line.highway });
@@ -378,31 +387,28 @@ export function createMovementResolver(roads: RoadsData): MovementResolver {
   const isStation = (point: LatLng) =>
     isInsideAnyZone(point, roads.stationPolygons ?? []);
 
+  const isOnSubwayLine = (point: LatLng) =>
+    matchWalkRoadOnLines(
+      point,
+      point.lat,
+      point.lng,
+      roads.subwayLines ?? [],
+      { includeBridges: true, endpointSlackM: ROAD_JUNCTION_SLACK_M },
+    ).onRoad;
+
+  const isOnSurfaceRoad = (point: LatLng) =>
+    isOnWalkRoad(point, roads.walkLines, false);
+
   const isValid = (point: LatLng, layer: MovementLayer): boolean => {
     if (isStation(point)) return true;
 
     if (layer === "underground") {
-      return matchWalkRoadOnLines(
-        point,
-        point.lat,
-        point.lng,
-        roads.subwayLines ?? [],
-      ).onRoad;
+      return isOnSubwayLine(point) || isStation(point);
     }
 
-    if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) {
-      // 도로(좁은 골목·넓은 대로 모두) 위면 건물 데이터 겹침과 관계없이 통행 허용
-      return isOnWalkRoad(point, roads.walkLines);
-    }
-    if (isInsideAnyZone(point, roads.apartmentPolygons ?? roads.walkPolygons ?? [])) {
-      return true;
-    }
-    return matchWalkRoadOnLines(
-      point,
-      point.lat,
-      point.lng,
-      roads.walkLines,
-    ).onRoad;
+    if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) return false;
+    if (isOnSurfaceRoad(point)) return true;
+    return isInsideWalkableZone(point, roads.walkPolygons ?? []);
   };
 
   return {
@@ -430,20 +436,13 @@ export function isValidPosition(
 
   const pt: LatLng = { lat, lng };
 
-  const insideBuilding = isInsideAnyBuilding(pt, blockPolygons);
+  if (isInsideAnyBuilding(pt, blockPolygons)) return false;
 
-  if (insideBuilding) {
-    return isOnWalkRoad(pt, walkLines);
-  }
+  if (isOnWalkRoad(pt, walkLines, false)) return true;
 
-  // 역과 아파트 단지의 건물 밖 공간은 이동할 수 있다.
   if (isInsideWalkableZone(pt, walkPolygons)) return true;
 
-  // 건물 밖: 도로 + 교차로 연결(bridge) 허용
-  return matchWalkRoadOnLines(pt, lat, lng, walkLines, {
-    includeBridges: true,
-    endpointSlackM: ROAD_JUNCTION_SLACK_M,
-  }).onRoad;
+  return false;
 }
 
 export function getNearestValidPoint(
@@ -500,6 +499,12 @@ const PLAYER_PROBE_ANGLES = [0, 28, -28, 55, -55, 82, -82, 110, -110];
 const ZOMBIE_PROBE_ANGLES = [
   0, 12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 75, -75, 90, -90, 105, -105,
   120, -120, 135, -135, 150, -150,
+];
+
+/** 막힘 탈출용 — 기본 각도 + 역방향·넓은 우회 */
+export const ZOMBIE_STUCK_PROBE_ANGLES = [
+  ...ZOMBIE_PROBE_ANGLES,
+  165, -165, 180, -180,
 ];
 
 function deltaFromHeading(
@@ -677,6 +682,43 @@ export function parseOverpassBuildings(elements: OverpassElement[]): LatLng[][] 
   }
 
   return blockPolygons;
+}
+
+export function parseOverpassTransit(elements: OverpassElement[]): {
+  subwayLines: WalkLine[];
+  stationPolygons: LatLng[][];
+} {
+  const subwayLines: WalkLine[] = [];
+  const stationPolygons: LatLng[][] = [];
+
+  for (const el of elements) {
+    if (isStationElement(el) && el.lat !== undefined && el.lon !== undefined) {
+      stationPolygons.push(circlePolygon(el.lat, el.lon));
+      continue;
+    }
+
+    if (!el.geometry) continue;
+
+    if (isStationElement(el) && el.geometry.length > 2) {
+      stationPolygons.push(geometryToPolygon(el.geometry));
+      continue;
+    }
+
+    if (isUndergroundSubwayElement(el)) {
+      for (let i = 0; i < el.geometry.length - 1; i += 1) {
+        subwayLines.push(
+          makeWalkLine(
+            { lat: el.geometry[i].lat, lng: el.geometry[i].lon },
+            { lat: el.geometry[i + 1].lat, lng: el.geometry[i + 1].lon },
+            8,
+            "subway",
+          ),
+        );
+      }
+    }
+  }
+
+  return { subwayLines, stationPolygons };
 }
 
 export function parseOverpassRoads(elements: OverpassElement[]): RoadsData {

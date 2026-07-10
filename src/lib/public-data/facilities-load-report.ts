@@ -105,7 +105,7 @@ export function logFacilitiesLoadReport(report: FacilitiesLoadReport): void {
   for (const [label, info] of rows) {
     const kind = info.isMock ? "⚠️ 임의값" : "✅ 실데이터";
     console.log(
-      `${label} | ${kind} | 출처: ${sourceLabel(info)} | 전체 ${info.count}건 | 구간 내 ${info.inBbox}건`,
+      `${label} | ${kind} | 출처: ${sourceLabel(info)} | 전체 ${info.count}건 | bbox 내 ${info.inBbox}건`,
     );
     if (info.error) console.warn(`  └ 오류: ${info.error}`);
     if (info.samples.length > 0) {

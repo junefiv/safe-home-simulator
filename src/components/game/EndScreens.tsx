@@ -9,7 +9,7 @@ export function EndScreens({ gameState, onRestart }: EndScreensProps) {
   if (!gameState) return null;
   const victory = gameState === "VICTORY";
   return (
-    <div className="ui-layer px-6 text-center" role="dialog" aria-modal="true">
+    <div className="ui-layer ui-layer-overlay px-6 text-center" role="dialog" aria-modal="true">
       <div className="text-6xl" aria-hidden>{victory ? "🏠" : "🧟"}</div>
       <h1 className={`mt-5 text-5xl font-black ${victory ? "text-emerald-400" : "text-rose-500"}`}>
         {victory ? "무사 귀가 성공!" : "귀가 실패"}

@@ -1,6 +1,10 @@
-import type { LatLng, NormalizedFacility, WalkLine } from "./types";
-import { haversineDistance } from "./geo";
+import type { Bbox, FacilityType, LatLng, NormalizedFacility, WalkLine } from "./types";
+import { distancePointToRouteM, haversineDistance, offsetByMeters } from "./geo";
 import { getNearestValidPoint } from "./roadValidation";
+import {
+  ROUTE_CORRIDOR_FETCH_PADDING_M,
+  ROUTE_CORRIDOR_RADIUS_M,
+} from "./constants";
 
 export type LoadingPhase = "init" | "roads" | "facilities" | "buildings" | "ready";
 
@@ -12,15 +16,68 @@ export interface FacilityCounts {
   store: number;
 }
 
+/** 시설점수 가중치 (가로등 제외) */
+export const FACILITY_SCORE_WEIGHTS = {
+  police: 4.2,
+  bell: 1.9,
+  store: 1.25,
+  cctv: 0.85,
+} as const;
+
+const MIN_DISTANCE_KM = 0.1;
+/** 안전점수 바 표시 — 35점 이상이면 100% */
+export const SAFETY_BAR_MAX = 35;
+
+export const FACILITY_GIMMICKS: {
+  key: keyof FacilityCounts;
+  emoji: string;
+  label: string;
+  text: string;
+}[] = [
+  {
+    key: "light",
+    emoji: "💡",
+    label: "가로등",
+    text: "반경 5m — 좀비 이동속도 90%. 패시브, 직접 조작 없음.",
+  },
+  {
+    key: "police",
+    emoji: "🚓",
+    label: "지구대·파출소",
+    text: "반경 8m 진입 시 HP+1·안전구역. 좀비 공격 면역, 좀비는 경찰서로 도망.",
+  },
+  {
+    key: "bell",
+    emoji: "🔔",
+    label: "귀가안심벨",
+    text: "4m 이내 자동 발동 → 5초 후 전 좀비 3초 감전. 쿨다운 30초.",
+  },
+  {
+    key: "cctv",
+    emoji: "📹",
+    label: "CCTV",
+    text: "반경 10m — 좀비 3초간 추격 중단(멈춤). CCTV당 30초 쿨다운.",
+  },
+  {
+    key: "store",
+    emoji: "🏪",
+    label: "편의점",
+    text: "반경 8m에서 5초 머무르면 충전. 충전 중 좀비 정지, 완료 시 이동 1.2배 5초.",
+  },
+];
+
 export const GAME_TIPS = [
-  "파출소·지구대 반경 안에 들어가면 좀비가 도망칩니다.",
-  "편의점에서 에너지 드링크를 채우면 잠시 더 빨리 달릴 수 있어요.",
+  "파출소·지구대 안에서는 좀비에게 잡히지 않습니다.",
+  "편의점에서 5초 머무르면 충전 중 좀비가 멈춥니다.",
   "보안등 밝은 곳에서는 좀비가 조금 느려집니다.",
   "CCTV 근처에 있으면 좀비가 잠시 멈출 수 있습니다.",
-  "안심벨을 누르면 주변 좀비가 잠시 기절합니다.",
-  "큰 도로를 따라가면 건물에 끼일 일이 적습니다.",
-  "좁은 골목은 건물 사이를 지나가야 할 때가 있습니다.",
+  "안심벨 근처 4m에서 5초 뒤 좀비가 3초간 감전됩니다.",
+  "큰 도로를 따라가면 이동이 수월합니다.",
+  "도로 밖으로 나가면 이동할 수 없습니다.",
 ] as const;
+
+const COLOCATE_RADIUS_M = 18;
+const COLOCATE_SPREAD_M = 5;
 
 export function countFacilities(facilities: NormalizedFacility[]): FacilityCounts {
   const counts: FacilityCounts = {
@@ -34,6 +91,127 @@ export function countFacilities(facilities: NormalizedFacility[]): FacilityCount
     if (f.type in counts) counts[f.type as keyof FacilityCounts] += 1;
   }
   return counts;
+}
+
+/** 경로 선 기준 corridor 이내 시설만 남긴다. */
+export function filterFacilitiesAlongRoute(
+  facilities: NormalizedFacility[],
+  route: LatLng[],
+  maxDistanceM = ROUTE_CORRIDOR_RADIUS_M,
+): NormalizedFacility[] {
+  if (route.length < 2) return facilities;
+  return facilities.filter(
+    (f) => distancePointToRouteM({ lat: f.lat, lng: f.lng }, route) <= maxDistanceM,
+  );
+}
+
+/** 경로 주변 API 조회용 bbox */
+export function bboxAlongRoute(route: LatLng[], paddingM = ROUTE_CORRIDOR_FETCH_PADDING_M): Bbox {
+  if (route.length === 0) {
+    return { south: 0, west: 0, north: 0, east: 0 };
+  }
+
+  let minLat = route[0].lat;
+  let maxLat = route[0].lat;
+  let minLng = route[0].lng;
+  let maxLng = route[0].lng;
+  for (const p of route) {
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
+  }
+
+  const centerLat = (minLat + maxLat) / 2;
+  const latPad = paddingM / 111111;
+  const lngPad = paddingM / (111111 * Math.cos((centerLat * Math.PI) / 180));
+
+  return {
+    south: minLat - latPad,
+    north: maxLat + latPad,
+    west: minLng - lngPad,
+    east: maxLng + lngPad,
+  };
+}
+
+/** CCTV·비상벨 등 같은 좌표 마커를 좌우로 분리 */
+export function layoutColocatedFacilityMarkers(
+  facilities: NormalizedFacility[],
+): NormalizedFacility[] {
+  const groups: NormalizedFacility[][] = [];
+  const used = new Set<string>();
+
+  for (const facility of facilities) {
+    if (used.has(facility.id)) continue;
+
+    const group = [facility];
+    used.add(facility.id);
+
+    for (const other of facilities) {
+      if (used.has(other.id)) continue;
+      if (haversineDistance(facility, other) <= COLOCATE_RADIUS_M) {
+        group.push(other);
+        used.add(other.id);
+      }
+    }
+
+    groups.push(group);
+  }
+
+  const out: NormalizedFacility[] = [];
+  for (const group of groups) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+
+    group.sort((a, b) => a.type.localeCompare(b.type));
+    const center = group[0];
+    const mid = (group.length - 1) / 2;
+
+    for (let i = 0; i < group.length; i += 1) {
+      const offsetEast = (i - mid) * COLOCATE_SPREAD_M;
+      const shifted = offsetByMeters(center, 0, offsetEast);
+      out.push({
+        ...group[i],
+        displayLat: shifted.lat,
+        displayLng: shifted.lng,
+      });
+    }
+  }
+
+  return out;
+}
+
+function facilityScore(counts: FacilityCounts): number {
+  return (
+    counts.police * FACILITY_SCORE_WEIGHTS.police +
+    counts.bell * FACILITY_SCORE_WEIGHTS.bell +
+    counts.store * FACILITY_SCORE_WEIGHTS.store +
+    counts.cctv * FACILITY_SCORE_WEIGHTS.cctv
+  );
+}
+
+/** 거리점수 — km 단위 (2km → 2) */
+export function distanceScoreKm(distanceM: number): number {
+  return distanceM / 1000;
+}
+
+/** 안전점수 = 시설점수 ÷ 거리점수(km). 클수록 안전 */
+export function computeSafetyScore(distanceM: number, counts: FacilityCounts): number {
+  const distanceKm = Math.max(distanceScoreKm(distanceM), MIN_DISTANCE_KM);
+  return facilityScore(counts) / distanceKm;
+}
+
+export function safetyLabel(score: number): string {
+  if (score >= 25) return "안전";
+  if (score >= 12) return "보통";
+  if (score >= 5) return "주의";
+  return "위험";
+}
+
+export function safetyBarPercent(score: number): number {
+  return Math.min(100, Math.max(4, (score / SAFETY_BAR_MAX) * 100));
 }
 
 export function buildStraightRoute(start: LatLng, end: LatLng, segments = 1): LatLng[] {
@@ -84,74 +262,18 @@ export function buildRecommendation(
   distanceM: number,
   counts: FacilityCounts,
 ): string {
-  const safety =
-    counts.police * 3 +
-    counts.bell * 0.4 +
-    counts.cctv * 0.05 +
-    counts.light * 0.01;
+  const safety = facilityScore(counts);
 
   if (distanceM > 2500 && safety < 8) {
     return "거리가 깁니다. 큰 도로와 밝은 길을 우선하세요.";
   }
-  if (counts.police >= 3) {
-    return "지구대·파출소가 많은 구간입니다. 위급 시 가까운 곳으로 피하세요.";
+  if (counts.police >= 2) {
+    return "지구대·파출소가 경로 근처에 있습니다. 위급 시 가까운 곳으로 피하세요.";
   }
-  if (counts.light < 30 && distanceM > 1200) {
-    return "어두운 구간이 있습니다. 보안등 있는 길을 찾아가세요.";
+  if (counts.bell + counts.cctv < 2 && distanceM > 1500) {
+    return "비상벨·CCTV가 적습니다. 큰 도로를 우선하세요.";
   }
   return "큰 도로 위주로 이동하면 안전합니다.";
-}
-
-/** 로딩 중 단조 증가용 난이도(0–100) */
-export function computeLiveDifficulty(
-  phase: LoadingPhase,
-  distanceM: number,
-  animatedCounts: FacilityCounts,
-  elapsedMs: number,
-): number {
-  const phaseFloor: Record<LoadingPhase, number> = {
-    init: 5,
-    roads: 18,
-    facilities: 38,
-    buildings: 62,
-    ready: 78,
-  };
-
-  const tick = Math.min(22, (elapsedMs / 1000) * 4);
-  let score = phaseFloor[phase] + tick;
-  score += Math.min(distanceM / 180, 14);
-
-  if (animatedCounts.light > 0) score += 6 * Math.min(1, animatedCounts.light / 80);
-  if (animatedCounts.cctv > 0) score += 5 * Math.min(1, animatedCounts.cctv / 40);
-  if (animatedCounts.police > 0) score += 7 * Math.min(1, animatedCounts.police / 5);
-  if (animatedCounts.bell > 0) score += 5 * Math.min(1, animatedCounts.bell / 10);
-  if (animatedCounts.store > 0) score += 4 * Math.min(1, animatedCounts.store / 15);
-
-  return Math.min(100, Math.round(score));
-}
-
-/** 브리핑 완료 후 최종 난이도 */
-export function computeFinalDifficulty(
-  distanceM: number,
-  counts: FacilityCounts,
-): number {
-  const distanceScore = Math.min(distanceM / 90, 38);
-  const safety =
-    counts.police * 3.5 +
-    counts.bell * 0.35 +
-    counts.cctv * 0.06 +
-    counts.light * 0.012 +
-    counts.store * 0.08;
-  return Math.round(
-    Math.min(100, Math.max(12, distanceScore + 42 - Math.min(safety, 36))),
-  );
-}
-
-export function difficultyLabel(score: number): string {
-  if (score < 30) return "여유";
-  if (score < 50) return "보통";
-  if (score < 70) return "주의";
-  return "위험";
 }
 
 export function projectToPreview(
@@ -175,22 +297,24 @@ export function projectToPreview(
 export function previewBounds(
   start: LatLng,
   end: LatLng,
+  route: LatLng[],
   facilities: NormalizedFacility[],
 ): { minLat: number; maxLat: number; minLng: number; maxLng: number } {
-  let minLat = Math.min(start.lat, end.lat);
-  let maxLat = Math.max(start.lat, end.lat);
-  let minLng = Math.min(start.lng, end.lng);
-  let maxLng = Math.max(start.lng, end.lng);
+  const points = [start, end, ...route, ...facilities.map((f) => ({ lat: f.lat, lng: f.lng }))];
+  let minLat = points[0].lat;
+  let maxLat = points[0].lat;
+  let minLng = points[0].lng;
+  let maxLng = points[0].lng;
 
-  for (const f of facilities) {
-    minLat = Math.min(minLat, f.lat);
-    maxLat = Math.max(maxLat, f.lat);
-    minLng = Math.min(minLng, f.lng);
-    maxLng = Math.max(maxLng, f.lng);
+  for (const p of points) {
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
   }
 
-  const latPad = Math.max((maxLat - minLat) * 0.18, 0.004);
-  const lngPad = Math.max((maxLng - minLng) * 0.18, 0.005);
+  const latPad = Math.max((maxLat - minLat) * 0.12, 0.003);
+  const lngPad = Math.max((maxLng - minLng) * 0.12, 0.004);
   return {
     minLat: minLat - latPad,
     maxLat: maxLat + latPad,
@@ -205,4 +329,55 @@ export function routeDistanceM(route: LatLng[]): number {
     total += haversineDistance(route[i - 1], route[i]);
   }
   return total;
+}
+
+const PREVIEW_EMOJI: Record<string, string> = {
+  police: "🚓",
+  bell: "🔔",
+  cctv: "📹",
+  store: "🏪",
+};
+
+/** 미리보기 지도용 — 겹치는 마커는 SVG x 오프셋 */
+export function previewMapMarkers(
+  facilities: NormalizedFacility[],
+): { id: string; lat: number; lng: number; emoji: string; xOffset: number }[] {
+  const important = facilities.filter(
+    (f) => f.type === "police" || f.type === "bell" || f.type === "cctv" || f.type === "store",
+  );
+
+  const groups: NormalizedFacility[][] = [];
+  const used = new Set<string>();
+
+  for (const f of important) {
+    if (used.has(f.id)) continue;
+    const group = [f];
+    used.add(f.id);
+    for (const other of important) {
+      if (used.has(other.id)) continue;
+      if (haversineDistance(f, other) <= COLOCATE_RADIUS_M) {
+        group.push(other);
+        used.add(other.id);
+      }
+    }
+    groups.push(group);
+  }
+
+  const markers: { id: string; lat: number; lng: number; emoji: string; xOffset: number }[] = [];
+  for (const group of groups) {
+    group.sort((a, b) => a.type.localeCompare(b.type));
+    const mid = (group.length - 1) / 2;
+    for (let i = 0; i < group.length; i += 1) {
+      const f = group[i];
+      markers.push({
+        id: f.id,
+        lat: f.displayLat ?? f.lat,
+        lng: f.displayLng ?? f.lng,
+        emoji: PREVIEW_EMOJI[f.type] ?? "📍",
+        xOffset: (i - mid) * 9,
+      });
+    }
+  }
+
+  return markers.slice(0, 60);
 }

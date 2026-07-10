@@ -45,3 +45,61 @@ export function bboxAroundPoint(lat: number, lng: number, radiusM: number): Bbox
     east: lng + lngPad,
   };
 }
+
+/** 점에서 선분까지 최단 거리(미터) */
+export function distancePointToSegmentM(p: LatLng, a: LatLng, b: LatLng): number {
+  return haversineDistance(p, projectPointToSegment(p, a, b));
+}
+
+/** 점을 선분 위에 투영한 좌표 */
+export function projectPointToSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
+  const latScale = METERS_PER_DEGREE_LAT;
+  const lngScale = METERS_PER_DEGREE_LAT * Math.cos((p.lat * Math.PI) / 180);
+  const ax = a.lng * lngScale;
+  const ay = a.lat * latScale;
+  const bx = b.lng * lngScale;
+  const by = b.lat * latScale;
+  const px = p.lng * lngScale;
+  const py = p.lat * latScale;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-6) return { ...a };
+
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return {
+    lat: (ay + t * dy) / latScale,
+    lng: (ax + t * dx) / lngScale,
+  };
+}
+
+/** 점에서 경로(폴리라인)까지 최단 거리(미터) */
+export function distancePointToRouteM(point: LatLng, route: LatLng[]): number {
+  if (route.length === 0) return Infinity;
+  if (route.length === 1) return haversineDistance(point, route[0]);
+
+  let min = Infinity;
+  for (let i = 1; i < route.length; i += 1) {
+    min = Math.min(min, distancePointToSegmentM(point, route[i - 1], route[i]));
+  }
+  return min;
+}
+
+/** 점을 경로(폴리라인) 위에 투영한 좌표 */
+export function projectPointToRoute(point: LatLng, route: LatLng[]): LatLng {
+  if (route.length === 0) return point;
+  if (route.length === 1) return route[0];
+
+  let best = route[0];
+  let bestDist = Infinity;
+  for (let i = 1; i < route.length; i += 1) {
+    const proj = projectPointToSegment(point, route[i - 1], route[i]);
+    const d = haversineDistance(point, proj);
+    if (d < bestDist) {
+      bestDist = d;
+      best = proj;
+    }
+  }
+  return best;
+}

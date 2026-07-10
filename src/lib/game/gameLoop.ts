@@ -3,14 +3,14 @@ import {
   WIN_DISTANCE_M,
   ZOMBIE_MAX_COUNT,
   ZOMBIE_SPAWN_INTERVAL_MS,
-  ZOMBIE_SPAWN_MAX_DISTANCE_M,
-  ZOMBIE_SPAWN_MIN_DISTANCE_M,
 } from "./constants";
 import type { GameFacility, Player, Zombie } from "./entities";
-import { Zombie as ZombieClass } from "./entities";
+import { isPlayerStoreCharging, Zombie as ZombieClass } from "./entities";
 import { haversineDistance } from "./geo";
+import { getRoadGraph } from "./roadGraph";
 import type { MovementResolver } from "./roadValidation";
 import type { InputState, JoystickVector, LatLng, WalkLine } from "./types";
+import { findZombieSpawnPosition } from "./zombieSpawn";
 
 export interface SpawnZombiesInput {
   dt: number;
@@ -37,44 +37,17 @@ export function spawnZombies(input: SpawnZombiesInput): SpawnZombiesResult {
   }
 
   zombieSpawnTimer = 0;
-  let isValidSpawn = false;
-  let spawnLat = player.lat;
-  let spawnLng = player.lng;
 
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const angle = Math.random() * Math.PI * 2;
-    const distMeters =
-      ZOMBIE_SPAWN_MIN_DISTANCE_M +
-      Math.random() * (ZOMBIE_SPAWN_MAX_DISTANCE_M - ZOMBIE_SPAWN_MIN_DISTANCE_M);
-    spawnLat = player.lat + (Math.sin(angle) * distMeters) / 111111;
-    spawnLng =
-      player.lng +
-      (Math.cos(angle) * distMeters) /
-        (111111 * Math.cos((player.lat * Math.PI) / 180));
+  const spawnPos = findZombieSpawnPosition({
+    player: player.latlng,
+    walkLines,
+    isValid,
+  });
 
-    if (isValid(spawnLat, spawnLng)) {
-      isValidSpawn = true;
-      break;
-    }
-  }
-
-  if (!isValidSpawn && walkLines.length > 0) {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const line = walkLines[Math.floor(Math.random() * walkLines.length)];
-      const dist = haversineDistance(player.latlng, line.p1);
-      if (dist > 80 && dist < 250) {
-        spawnLat = line.p1.lat;
-        spawnLng = line.p1.lng;
-        isValidSpawn = true;
-        break;
-      }
-    }
-  }
-
-  if (isValidSpawn) {
+  if (spawnPos) {
     zombies = [
       ...zombies,
-      new ZombieClass(spawnLat, spawnLng, map, player.movementLayer),
+      new ZombieClass(spawnPos.lat, spawnPos.lng, map, player.movementLayer),
     ];
   }
 
@@ -216,6 +189,8 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
     if (facility.type === "bell") facility.update(dt);
     else if (facility.type === "store") {
       facility.updateStore(dt, player.latlng, playing);
+    } else if (facility.type === "police") {
+      facility.updatePoliceBarrier(dt);
     }
   }
 
@@ -231,6 +206,18 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
   zombies = spawnResult.zombies;
   zombieSpawnTimer = spawnResult.zombieSpawnTimer;
 
+  const storeChargingActive = isPlayerStoreCharging(player.latlng, facilities);
+
+  const activeWalkLines =
+    player.movementLayer === "underground" ? subwayLines : walkLines;
+  const roadGraph = getRoadGraph(activeWalkLines);
+  const findSpawnPosition = () =>
+    findZombieSpawnPosition({
+      player: player.latlng,
+      walkLines: activeWalkLines,
+      isValid,
+    });
+
   zombies.forEach((z) =>
     z.update(
       dt,
@@ -238,7 +225,13 @@ export function updateGameLoop(input: UpdateGameLoopInput): UpdateGameLoopResult
       nearbyFacilities(z.latlng, facilities),
       globalSirenActive,
       globalStunActive,
+      storeChargingActive,
       movement,
+      {
+        walkLines: activeWalkLines,
+        roadGraph,
+        findSpawnPosition,
+      },
     ),
   );
 

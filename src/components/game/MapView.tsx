@@ -1,15 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 import { MapContainer, TileLayer, useMap } from "react-leaflet";
 import type L from "leaflet";
-import { GAME_MAP_ZOOM, VWORLD_MAP_ZOOM } from "@/lib/game/constants";
-import { GoogleMutantLayer } from "./GoogleMutantLayer";
+import { VWORLD_MAP_ZOOM } from "@/lib/game/constants";
 
 interface MapViewProps {
   center: [number, number];
   zoom?: number;
-  googleMapsApiKey?: string;
   onMapReady: (map: L.Map) => void;
 }
 
@@ -34,22 +32,13 @@ function ClampZoom({ maxZoom }: { maxZoom: number }) {
 export function MapView({
   center,
   zoom = 15,
-  googleMapsApiKey = "",
   onMapReady,
 }: MapViewProps) {
-  const [googleFailed, setGoogleFailed] = useState(false);
-  const useGoogle = Boolean(googleMapsApiKey.trim()) && !googleFailed;
-  const mapMaxZoom = useGoogle ? GAME_MAP_ZOOM : VWORLD_MAP_ZOOM;
-
-  const handleGoogleError = useCallback(() => {
-    setGoogleFailed(true);
-  }, []);
-
   return (
     <MapContainer
       center={center}
       zoom={zoom}
-      maxZoom={mapMaxZoom}
+      maxZoom={VWORLD_MAP_ZOOM}
       zoomControl={false}
       dragging={false}
       scrollWheelZoom={false}
@@ -58,22 +47,21 @@ export function MapView({
       boxZoom={false}
       keyboard={false}
       preferCanvas
-      attributionControl={!useGoogle}
+      attributionControl
       className="game-map"
       style={{ width: "100vw", height: "100vh" }}
     >
-      {useGoogle ? (
-        <GoogleMutantLayer apiKey={googleMapsApiKey} onError={handleGoogleError} />
-      ) : (
-        <>
-          <ClampZoom maxZoom={VWORLD_MAP_ZOOM} />
-          <TileLayer
-            attribution='&copy; <a href="https://www.vworld.kr/">VWorld</a> / 국토교통부'
-            url="/api/map-tiles/{z}/{x}/{y}.png"
-            maxZoom={VWORLD_MAP_ZOOM}
-          />
-        </>
-      )}
+      <ClampZoom maxZoom={VWORLD_MAP_ZOOM} />
+      <TileLayer
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        maxZoom={19}
+      />
+      <TileLayer
+        attribution='&copy; <a href="https://www.vworld.kr/">VWorld</a> / MOLIT'
+        url="/api/map-tiles/{z}/{x}/{y}.png"
+        maxZoom={VWORLD_MAP_ZOOM}
+      />
       <MapReadyBridge onMapReady={onMapReady} />
     </MapContainer>
   );
