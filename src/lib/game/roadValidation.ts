@@ -5,7 +5,6 @@ import {
   ROAD_BUILDING_OVERLAP_SLACK_M,
   ROAD_JUNCTION_SLACK_M,
   ROAD_SEGMENT_TOLERANCE_M,
-  ROAD_STRICT_ENDPOINT_SLACK_M,
   WALKABLE_HIGHWAY_TYPES,
 } from "./constants";
 import { haversineDistance } from "./geo";
@@ -219,8 +218,17 @@ function getRoadIndex(walkLines: WalkLine[]): Map<string, WalkLine[]> {
 }
 
 function nearbyWalkLines(lat: number, lng: number, walkLines: WalkLine[]): WalkLine[] {
-  const key = `${Math.floor(lat / ROAD_INDEX_CELL_DEG)}:${Math.floor(lng / ROAD_INDEX_CELL_DEG)}`;
-  return getRoadIndex(walkLines).get(key) ?? [];
+  const index = getRoadIndex(walkLines);
+  const row = Math.floor(lat / ROAD_INDEX_CELL_DEG);
+  const col = Math.floor(lng / ROAD_INDEX_CELL_DEG);
+  const result: WalkLine[] = [];
+  for (let dr = -1; dr <= 1; dr += 1) {
+    for (let dc = -1; dc <= 1; dc += 1) {
+      const bucket = index.get(`${row + dr}:${col + dc}`);
+      if (bucket) result.push(...bucket);
+    }
+  }
+  return result;
 }
 
 function isOnWalkRoad(
@@ -379,10 +387,6 @@ export interface MovementResolver {
   resolveLayer(current: LatLng, next: LatLng, layer: MovementLayer): MovementLayer;
 }
 
-function oppositeLayer(layer: MovementLayer): MovementLayer {
-  return layer === "surface" ? "underground" : "surface";
-}
-
 export function createMovementResolver(roads: RoadsData): MovementResolver {
   const isStation = (point: LatLng) =>
     isInsideAnyZone(point, roads.stationPolygons ?? []);
@@ -397,30 +401,31 @@ export function createMovementResolver(roads: RoadsData): MovementResolver {
     ).onRoad;
 
   const isOnSurfaceRoad = (point: LatLng) =>
-    isOnWalkRoad(point, roads.walkLines, false);
+    isOnWalkRoad(point, roads.walkLines, true);
 
   const isValid = (point: LatLng, layer: MovementLayer): boolean => {
-    if (isStation(point)) return true;
+    // 지하철역·지하철 노선은 지상 통행 시 막히지 않고 지나갈 수 있다.
+    if (isStation(point) || isOnSubwayLine(point)) return true;
 
     if (layer === "underground") {
-      return isOnSubwayLine(point) || isStation(point);
+      return false;
     }
 
-    if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) return false;
+    // 도로 위면 건물 폴리곤보다 도로를 우선한다 (건물과 겹쳐도 통행).
     if (isOnSurfaceRoad(point)) return true;
+
+    if (isInsideAnyBuilding(point, roads.blockPolygons ?? [])) return false;
     return isInsideWalkableZone(point, roads.walkPolygons ?? []);
   };
 
   return {
     isValid,
-    canMove(current, next, layer) {
-      if (isValid(next, layer)) return true;
-      return isStation(current) && isValid(next, oppositeLayer(layer));
+    canMove(_current, next, layer) {
+      return isValid(next, layer);
     },
-    resolveLayer(current, next, layer) {
+    resolveLayer(_current, next, layer) {
       if (isValid(next, layer)) return layer;
-      const other = oppositeLayer(layer);
-      return isStation(current) && isValid(next, other) ? other : layer;
+      return layer;
     },
   };
 }
@@ -436,9 +441,10 @@ export function isValidPosition(
 
   const pt: LatLng = { lat, lng };
 
-  if (isInsideAnyBuilding(pt, blockPolygons)) return false;
+  // 도로 위면 건물보다 도로 우선
+  if (isOnWalkRoad(pt, walkLines, true)) return true;
 
-  if (isOnWalkRoad(pt, walkLines, false)) return true;
+  if (isInsideAnyBuilding(pt, blockPolygons)) return false;
 
   if (isInsideWalkableZone(pt, walkPolygons)) return true;
 

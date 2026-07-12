@@ -23,7 +23,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "bbox required" }, { status: 400 });
   }
 
-  const cached = getCachedBuildings(bbox);
+  const cached = (() => {
+    try {
+      return getCachedBuildings(bbox);
+    } catch (err) {
+      console.error(
+        "[buildings] map-cache 읽기 실패 → 실시간 API로 폴백:",
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+  })();
   if (cached) {
     return NextResponse.json({
       blockPolygons: cached,

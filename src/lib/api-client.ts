@@ -30,7 +30,10 @@ export async function fetchRoads(bbox: Bbox): Promise<RoadsData> {
   const res = await fetch(`/api/roads?${params}`);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? "도로 데이터를 불러오지 못했습니다");
+    throw new Error(
+      body?.error ??
+        `도로 데이터를 불러오지 못했습니다 (HTTP ${res.status})`,
+    );
   }
   return (await res.json()) as RoadsData;
 }

@@ -43,6 +43,8 @@ npm run dev
 
 `vercel.json`에서 `/api/facilities`, `/api/roads` 함수 `maxDuration`을 30초로 설정했습니다. Pro 플랜에서 더 긴 타임아웃이 필요하면 값을 조정하세요.
 
+시설물·도로·건물 **캐시 갱신 명령어**, GitHub에 올리지 않는 이유, 객체 스토리지(R2/S3/Blob) 보관과 배포 방법은 [docs/DATA_CACHE.md](docs/DATA_CACHE.md)를 보세요.
+
 ## 게임 규칙
 
 - WASD/방향키 또는 모바일 조이스틱으로 **도로 위에서만** 이동

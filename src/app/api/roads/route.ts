@@ -4,6 +4,7 @@ import {
   parseOverpassRoads,
   parseOverpassTransit,
 } from "@/lib/game/roadValidation";
+import { ROAD_JUNCTION_SLACK_M } from "@/lib/game/constants";
 import {
   buildRoadsOverpassQuery,
   buildSubwayOverpassQuery,
@@ -70,6 +71,47 @@ function mergePolygons(primary: LatLng[][], supplement: LatLng[][]): LatLng[][] 
   return merged;
 }
 
+function roadNameHalfWidthM(name?: string): number | null {
+  if (!name) return null;
+  if (/대로$/.test(name)) return 36;
+  if (/로$/.test(name)) return 26;
+  if (/길$/.test(name)) return 12;
+  return null;
+}
+
+function widenNamedRoadLine(line: WalkLine): WalkLine {
+  const namedWidth = roadNameHalfWidthM(line.highway);
+  if (!namedWidth || line.maxDistM >= namedWidth) return line;
+
+  const maxDistM = namedWidth;
+  const pad = (maxDistM + ROAD_JUNCTION_SLACK_M) / 111111;
+  return {
+    ...line,
+    maxDistM,
+    minLat: Math.min(line.p1.lat, line.p2.lat) - pad,
+    maxLat: Math.max(line.p1.lat, line.p2.lat) + pad,
+    minLng: Math.min(line.p1.lng, line.p2.lng) - pad,
+    maxLng: Math.max(line.p1.lng, line.p2.lng) + pad,
+  };
+}
+
+function normalizeTransitAsWalkable(roads: RoadsData): RoadsData {
+  const surfaceLines = roads.walkLines.map(widenNamedRoadLine);
+  const walkLines = bridgeRoadGaps(
+    mergeWalkLines(surfaceLines, roads.subwayLines ?? []),
+  );
+  const walkPolygons = mergePolygons(
+    roads.walkPolygons ?? [],
+    roads.stationPolygons ?? [],
+  );
+
+  return {
+    ...roads,
+    walkLines,
+    walkPolygons,
+  };
+}
+
 async function fetchOsmRoads(bbox: Bbox): Promise<RoadsData | null> {
   const bboxStr = `${bbox.south},${bbox.west},${bbox.north},${bbox.east}`;
   try {
@@ -110,12 +152,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "bbox required" }, { status: 400 });
   }
 
-  const cached = getCachedRoads(bbox);
+  let cached: ReturnType<typeof getCachedRoads> = null;
+  try {
+    cached = getCachedRoads(bbox);
+  } catch (err) {
+    console.error(
+      "[roads] map-cache 읽기 실패 → 실시간 API로 폴백:",
+      err instanceof Error ? err.message : err,
+    );
+  }
   if (cached) {
+    const normalized = normalizeTransitAsWalkable(cached);
     return NextResponse.json({
-      ...cached,
+      ...normalized,
       source: "cache",
-      walkLineCount: cached.walkLines.length,
+      walkLineCount: normalized.walkLines.length,
       cached: true,
     });
   }
@@ -166,7 +217,7 @@ export async function GET(request: NextRequest) {
     osmRoads?.stationPolygons ?? [],
   );
 
-  const roads: RoadsData = {
+  const roads = normalizeTransitAsWalkable({
     walkLines,
     subwayLines: transit.subwayLines,
     stationPolygons,
@@ -174,7 +225,7 @@ export async function GET(request: NextRequest) {
     apartmentPolygons: [],
     blockPolygons: [],
     buildingCoverage: [],
-  };
+  });
 
   return NextResponse.json({
     ...roads,

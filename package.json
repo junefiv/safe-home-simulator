@@ -12,6 +12,7 @@
     "build:convenience-stores": "node --env-file=.env.local scripts/build-safemap-facilities.mjs stores",
     "build:facility-cache": "npm run build:police-stations && npm run build:safemap-facilities && npm run convert:facility-csv",
     "build:map-cache": "node --env-file=.env.local scripts/build-map-cache.mjs",
+    "build:map-cache:init": "node --env-file=.env.local scripts/build-map-cache.mjs --init",
     "build:all-cache": "npm run build:facility-cache && npm run build:map-cache",
     "convert:facility-csv": "python scripts/convert_facility_csv.py"
   },

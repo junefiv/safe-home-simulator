@@ -7,7 +7,6 @@ import {
   BUILDING_LOOKAHEAD_RATIO,
   BUILDING_TILE_CHECK_MS,
   PLAYER_MAX_HP,
-  ROADS_BOUNDS_PADDING,
   STORE_PLAYER_SPEED_MULTIPLIER,
   VWORLD_MAP_ZOOM,
 } from "@/lib/game/constants";
@@ -19,18 +18,13 @@ import {
   createHomeIcon,
 } from "@/lib/game/entities";
 import {
-  buildRecommendation,
-  buildSnappedPreviewRoute,
   buildStraightRoute,
-  bboxAlongRoute,
   countFacilities,
-  filterFacilitiesAlongRoute,
   layoutColocatedFacilityMarkers,
-  routeDistanceM,
   type FacilityCounts,
   type LoadingPhase,
 } from "@/lib/game/briefing";
-import { haversineDistance } from "@/lib/game/geo";
+import { bboxAroundPoint, haversineDistance } from "@/lib/game/geo";
 import { updateGameLoop } from "@/lib/game/gameLoop";
 import { cellStorageKey, wrapPolygons } from "@/lib/game/blockPolygon";
 import {
@@ -375,111 +369,36 @@ export function Game() {
       const startLatLng: LatLng = { lat: start.lat, lng: start.lng };
       const endLatLng: LatLng = { lat: end.lat, lng: end.lng };
       const straightDistance = haversineDistance(startLatLng, endLatLng);
+      const START_AREA_RADIUS_M = 500;
+      const localBbox = bboxAroundPoint(
+        startLatLng.lat,
+        startLatLng.lng,
+        START_AREA_RADIUS_M,
+      );
 
       setLoading(true);
-      setLoadingLabel("도로 데이터 로딩 중...");
-      setPreviewPhase("init");
+      setLoadingLabel("출발지 주변 로딩 중...");
+      setPreviewPhase("roads");
       setPreviewStart(startLatLng);
       setPreviewEnd(endLatLng);
-      setPreviewRoute(buildStraightRoute(startLatLng, endLatLng, 12));
+      setPreviewRoute(buildStraightRoute(startLatLng, endLatLng, 8));
       setRoadsSnapped(false);
       setPreviewFacilities([]);
       setPreviewCounts(EMPTY_FACILITY_COUNTS);
       setPreviewDistanceM(straightDistance);
-      setPreviewRecommendation("");
+      setPreviewRecommendation(
+        "이동하면서 주변 도로·건물·시설물이 자동으로 로드됩니다.",
+      );
       cleanupEntities();
 
       endRef.current = endLatLng;
       setDestination(endLatLng);
-
-      const bounds = L.latLngBounds(
-        [startLatLng.lat, startLatLng.lng],
-        [endLatLng.lat, endLatLng.lng],
-      );
-      const padded = bounds.pad(ROADS_BOUNDS_PADDING);
-      const roadsBbox = {
-        south: padded.getSouth(),
-        west: padded.getWest(),
-        north: padded.getNorth(),
-        east: padded.getEast(),
-      };
-
-      setPreviewPhase("roads");
-      let routeDistance = straightDistance;
-      let snapped = buildStraightRoute(startLatLng, endLatLng, 12);
-      try {
-        roadsRef.current = await fetchRoads(roadsBbox);
-        movementRef.current = createMovementResolver(roadsRef.current);
-        if (roadsRef.current.walkLines.length === 0) {
-          setToast("이동 가능한 도로 데이터가 없습니다. 다시 시도해주세요.");
-          setLoading(false);
-          setPreviewPhase("init");
-          return;
-        }
-        snapped = buildSnappedPreviewRoute(
-          startLatLng,
-          endLatLng,
-          roadsRef.current.walkLines,
-        );
-        routeDistance = routeDistanceM(snapped) || straightDistance;
-        setPreviewRoute(snapped);
-        setRoadsSnapped(true);
-        setPreviewDistanceM(routeDistance);
-      } catch (err) {
-        const msg =
-          err instanceof Error ? err.message : "도로 데이터를 불러오지 못했습니다. 다시 시도해주세요.";
-        setToast(msg.includes("도로") ? msg : `도로 데이터를 불러오지 못했습니다. (${msg})`);
-        setLoading(false);
-        setPreviewPhase("init");
-        return;
-      }
-
-      setPreviewPhase("facilities");
-      setLoadingLabel("주변 안전시설 스캔 중...");
-      let briefingFacilities: NormalizedFacility[] = [];
-      let gameFacilities: NormalizedFacility[] = [];
-      try {
-        const facilityResult = await fetchFacilities(bboxAlongRoute(snapped));
-        gameFacilities = layoutColocatedFacilityMarkers(facilityResult.facilities);
-        briefingFacilities = filterFacilitiesAlongRoute(gameFacilities, snapped);
-        const counts = countFacilities(briefingFacilities);
-        setPreviewFacilities(briefingFacilities);
-        setPreviewCounts(counts);
-        setPreviewRecommendation(buildRecommendation(routeDistance, counts));
-        if (facilityResult.loadReport?.light.error) {
-          setToast(facilityResult.loadReport.light.error);
-        } else if (facilityResult.loadReport?.light.isMock) {
-          setToast("보안등은 API 미연동으로 임시(mock) 데이터입니다.");
-        }
-        if (counts.police === 0) {
-          const policeInBbox = facilityResult.loadReport?.police.inBbox ?? 0;
-          if (facilityResult.loadReport?.police.error) {
-            setToast(facilityResult.loadReport.police.error);
-          } else if (policeInBbox === 0) {
-            setToast("이 귀가 경로 근처에 파출소·지구대가 없습니다.");
-          }
-        }
-      } catch {
-        briefingFacilities = [];
-        gameFacilities = [];
-        setToast("시설물 데이터 로딩에 실패했습니다.");
-      }
-
-      setPreviewPhase("buildings");
-      setLoadingLabel("嫄대Ъ 異⑸룎 ?곗씠??濡쒕뵫 以?..");
-      try {
-        const initialBuildings = await fetchBuildings(roadsBbox);
-        roadsRef.current = {
-          ...roadsRef.current,
-          blockPolygons: wrapPolygons(initialBuildings),
-        };
-        movementRef.current = createMovementResolver(roadsRef.current);
-      } catch (err) {
-        console.warn(
-          "[buildings] 초기 건물 데이터 로드 실패:",
-          err instanceof Error ? err.message : err,
-        );
-      }
+      facilityIdsRef.current = new Set();
+      loadedRuntimeCellsRef.current = new Set();
+      loadingRuntimeCellsRef.current = new Set();
+      buildingTileStoreRef.current = new Map();
+      lastRuntimeCellRef.current = null;
+      viewportGridRef.current = null;
 
       const startMarker = L.marker([startLatLng.lat, startLatLng.lng], {
         icon: createEmojiIcon("🚩"),
@@ -502,26 +421,61 @@ export function Game() {
         className: "home-marker-pulse",
       }).addTo(map);
       startMarkersRef.current = [startMarker, endMarker, endPulse];
+      map.setView([startLatLng.lat, startLatLng.lng], VWORLD_MAP_ZOOM);
+
+      try {
+        const [roads, buildings, facilityResult] = await Promise.all([
+          fetchRoads(localBbox),
+          fetchBuildings(localBbox),
+          fetchFacilities(localBbox),
+        ]);
+
+        if (roads.walkLines.length === 0) {
+          setToast("출발지 주변에 이동 가능한 도로가 없습니다. 위치를 바꿔 주세요.");
+          setLoading(false);
+          setPreviewPhase("init");
+          return;
+        }
+
+        roadsRef.current = {
+          ...roads,
+          blockPolygons: wrapPolygons(buildings),
+          apartmentPolygons: roads.apartmentPolygons ?? [],
+        };
+        movementRef.current = createMovementResolver(roadsRef.current);
+
+        const localFacilities = layoutColocatedFacilityMarkers(
+          facilityResult.facilities,
+        );
+        const facilityCallbacks = createFacilityCallbacks();
+        facilitiesRef.current = localFacilities.map(
+          (f) => new GameFacility(f, map, { ...facilityCallbacks }),
+        );
+        facilityIdsRef.current = new Set(localFacilities.map((f) => f.id));
+        setPreviewFacilities(localFacilities);
+        setPreviewCounts(countFacilities(localFacilities));
+
+        if (facilityResult.loadReport?.light.error) {
+          setToast(facilityResult.loadReport.light.error);
+        }
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "출발지 주변 데이터를 불러오지 못했습니다.";
+        setToast(msg);
+        setLoading(false);
+        setPreviewPhase("init");
+        return;
+      }
 
       const startPt = getNearestValidPoint(
         startLatLng.lat,
         startLatLng.lng,
         roadsRef.current.walkLines,
       );
-
       map.setView([startPt.lat, startPt.lng], VWORLD_MAP_ZOOM);
-
-      const facilityCallbacks = createFacilityCallbacks();
-
-      facilitiesRef.current = gameFacilities.map(
-        (f) =>
-          new GameFacility(f, map, {
-            ...facilityCallbacks,
-          }),
-      );
-      facilityIdsRef.current = new Set(gameFacilities.map((f) => f.id));
       viewportGridRef.current = createViewportGrid(map);
-      lastRuntimeCellRef.current = null;
 
       playerRef.current = new Player(startPt.lat, startPt.lng, map, {
         onDamage: () => setToast("좀비에게 공격당했습니다!"),
@@ -533,15 +487,14 @@ export function Game() {
 
       setHp(PLAYER_MAX_HP);
       setZombieCount(0);
-      setPreviewCounts(countFacilities(briefingFacilities));
-      setPreviewRecommendation(
-        buildRecommendation(routeDistance, countFacilities(briefingFacilities)),
-      );
       setPreviewPhase("ready");
-      setGameState("BRIEFING");
       setLoading(false);
+      setGameState("PLAYING");
+      setShowHud(true);
+      setShowJoystick(window.innerWidth <= 768);
+      startGameLoop();
     },
-    [cleanupEntities, createFacilityCallbacks, endGame],
+    [cleanupEntities, createFacilityCallbacks, endGame, startGameLoop],
   );
 
   useEffect(() => {
@@ -643,9 +596,12 @@ export function Game() {
           loadedRuntimeCellsRef.current.add(cellStorageKey(candidate.row, candidate.col));
         }
       } catch (err) {
-        console.warn(
-          "[runtime-map] 주변 데이터 로드 실패:",
-          err instanceof Error ? err.message : err,
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn("[runtime-map] 주변 데이터 로드 실패:", message);
+        setToast(
+          message.includes("도로")
+            ? message
+            : `주변 지도 데이터를 일부 불러오지 못했습니다. (${message})`,
         );
       } finally {
         loadingRuntimeCellsRef.current.delete(centerKey);
@@ -673,6 +629,22 @@ export function Game() {
       lastRuntimeCellRef.current = cell;
       void loadRuntimeCell(cell, grid);
     }, BUILDING_TILE_CHECK_MS);
+
+    // 시작 직 주변 셀을 바로 한 번 로드
+    {
+      const player = playerRef.current;
+      const map = mapRef.current;
+      if (player && map) {
+        let grid = viewportGridRef.current;
+        if (!grid) {
+          grid = createViewportGrid(map);
+          viewportGridRef.current = grid;
+        }
+        const cell = getPlayerGridCell(player.lat, player.lng, grid);
+        lastRuntimeCellRef.current = cell;
+        void loadRuntimeCell(cell, grid);
+      }
+    }
 
     return () => {
       cancelled = true;
