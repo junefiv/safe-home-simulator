@@ -35,11 +35,6 @@ html {
   z-index: 1;
 }
 
-/* Leaflet + Google Mutant */
-.game-map .leaflet-google-mutant {
-  z-index: 0;
-}
-
 .game-map .gm-style img {
   max-width: none !important;
 }

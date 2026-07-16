@@ -53,12 +53,7 @@ export function MapView({
     >
       <ClampZoom maxZoom={VWORLD_MAP_ZOOM} />
       <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        maxZoom={19}
-      />
-      <TileLayer
-        attribution='&copy; <a href="https://www.vworld.kr/">VWorld</a> / MOLIT'
+        attribution='&copy; <a href="https://www.vworld.kr/">VWorld</a> / 국토교통부'
         url="/api/map-tiles/{z}/{x}/{y}.png"
         maxZoom={VWORLD_MAP_ZOOM}
       />

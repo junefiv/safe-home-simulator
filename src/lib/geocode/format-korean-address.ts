@@ -1,5 +1,5 @@
-/** Nominatim addressdetails 구조 (한국) */
-export interface NominatimAddressParts {
+/** 한국 주소 파싱용 필드 구조 */
+export interface KoreanAddressParts {
   city?: string;
   borough?: string;
   road?: string;
@@ -44,7 +44,7 @@ export function expandSidoPrefix(address: string): string {
   return trimmed;
 }
 
-export function formatRoadAddressFromParts(parts: NominatimAddressParts): string | undefined {
+export function formatRoadAddressFromParts(parts: KoreanAddressParts): string | undefined {
   if (!parts.road) return undefined;
 
   const segments: string[] = [];
@@ -56,7 +56,7 @@ export function formatRoadAddressFromParts(parts: NominatimAddressParts): string
   return segments.length >= 3 ? segments.join(" ") : undefined;
 }
 
-export function formatJibunAddressFromParts(parts: NominatimAddressParts): string | undefined {
+export function formatJibunAddressFromParts(parts: KoreanAddressParts): string | undefined {
   const dong = parts.quarter ?? parts.suburb;
   if (!dong) return undefined;
 
@@ -72,7 +72,7 @@ export function formatJibunAddressFromParts(parts: NominatimAddressParts): strin
 
 export function pickPlaceName(
   name: string | undefined,
-  parts: NominatimAddressParts,
+  parts: KoreanAddressParts,
 ): string | undefined {
   if (name?.trim()) return name.trim();
   if (parts.building?.trim()) return parts.building.trim();

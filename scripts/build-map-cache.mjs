@@ -28,12 +28,6 @@ const SPLIT_MAX_DEPTH = Math.max(0, Number(process.env.MAP_CACHE_SPLIT_DEPTH ?? 
 const VWORLD_DATA_URL = "https://api.vworld.kr/req/data";
 const VWORLD_ROAD_LAYER = "LT_L_SPRD";
 const VWORLD_BUILDING_LAYER = "LT_C_BLDGINFO";
-const OVERPASS_SERVERS = [
-  "https://overpass.openstreetmap.fr/api/interpreter",
-  "https://overpass.openstreetmap.ru/api/interpreter",
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-];
 
 const ROAD_SEGMENT_TOLERANCE_M = 14;
 const ROAD_JUNCTION_SLACK_M = 8;
@@ -396,7 +390,13 @@ function isStationFeature(feature) {
     feature.properties?.bldg_nm,
     feature.properties?.regstr_kind_nm,
   ].filter(Boolean).join(" ");
-  return /station|subway/i.test(text);
+  return /지하철|철도|역사|환승|전철|역\b|station|subway/i.test(text);
+}
+
+function featuresToStationPolygons(features) {
+  return features.flatMap((feature) =>
+    isStationFeature(feature) ? geometryToPolygons(feature.geometry) : [],
+  );
 }
 
 function featuresToBlockPolygons(features) {
@@ -466,218 +466,38 @@ function bridgeRoadGaps(walkLines) {
   return bridges.length > 0 ? [...walkLines, ...bridges] : walkLines;
 }
 
-function buildRoadsQuery(bbox) {
-  const b = `${bbox.south},${bbox.west},${bbox.north},${bbox.east}`;
-  return `[out:json][timeout:20];
-(
-  way["highway"~"^(footway|path|pedestrian|steps|living_street|service|residential|unclassified|tertiary|tertiary_link|road)$"](${b});
-  way["railway"="subway"](${b});
-  way["building"="train_station"](${b});
-  way["railway"="station"](${b});
-  way["public_transport"="station"](${b});
-  way["station"="subway"](${b});
-  way["public_transport"="platform"]["subway"="yes"](${b});
-  node["railway"~"^(station|subway_entrance)$"](${b});
-  way["landuse"="residential"]["residential"~"^(apartment|apartments)$"](${b});
-);
-out geom;`;
-}
-
-async function fetchOverpass(query) {
-  let lastError = "";
-  for (const server of OVERPASS_SERVERS) {
-    try {
-      const res = await fetch(server, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "SafeHomeSimulator/1.0 cache builder",
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!res.ok) {
-        lastError = `HTTP ${res.status}`;
-        continue;
-      }
-      return res.json();
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-    }
-  }
-  throw new Error(lastError || "Overpass failed");
-}
-
-function isStationElement(el) {
-  const tags = el.tags ?? {};
-  return Boolean(
-    tags.building === "train_station" ||
-      tags.railway === "station" ||
-      tags.railway === "subway_entrance" ||
-      tags.station === "subway" ||
-      tags.subway === "yes" ||
-      tags.public_transport === "station",
-  );
-}
-
-function isApartmentComplexElement(el) {
-  const tags = el.tags ?? {};
-  return tags.landuse === "residential" &&
-    ["apartment", "apartments"].includes(String(tags.residential ?? "").toLowerCase());
-}
-
-function isUndergroundSubwayElement(el) {
-  const tags = el.tags ?? {};
-  if (tags.railway !== "subway") return false;
-  const layer = Number(tags.layer ?? "0");
-  return !(tags.bridge === "yes" || tags.embankment === "yes" || tags.location === "overground" || layer > 0);
-}
-
-function circlePolygon(lat, lng, radiusM = 24) {
-  return Array.from({ length: 16 }, (_, index) => {
-    const angle = (index / 16) * Math.PI * 2;
-    return {
-      lat: lat + (Math.sin(angle) * radiusM) / 111111,
-      lng: lng + (Math.cos(angle) * radiusM) / (111111 * Math.cos((lat * Math.PI) / 180)),
-    };
-  });
-}
-
-function parseOverpassRoads(elements = []) {
-  const walkLines = [];
-  const subwayLines = [];
-  const stationPolygons = [];
-  const apartmentPolygons = [];
-
-  for (const el of elements) {
-    if (isStationElement(el) && el.lat !== undefined && el.lon !== undefined) {
-      stationPolygons.push(circlePolygon(el.lat, el.lon));
-      continue;
-    }
-    if (!el.geometry) continue;
-
-    if (isStationElement(el) && el.geometry.length > 2) {
-      stationPolygons.push(el.geometry.map((pt) => ({ lat: pt.lat, lng: pt.lon })));
-      continue;
-    }
-    if (isApartmentComplexElement(el) && el.geometry.length > 2) {
-      apartmentPolygons.push(el.geometry.map((pt) => ({ lat: pt.lat, lng: pt.lon })));
-      continue;
-    }
-    if (isUndergroundSubwayElement(el)) {
-      for (let i = 0; i < el.geometry.length - 1; i += 1) {
-        subwayLines.push(makeWalkLine(
-          { lat: el.geometry[i].lat, lng: el.geometry[i].lon },
-          { lat: el.geometry[i + 1].lat, lng: el.geometry[i + 1].lon },
-          8,
-          "subway",
-        ));
-      }
-      continue;
-    }
-    const highway = el.tags?.highway;
-    if (!highway) continue;
-    const maxDistM = ROAD_SEGMENT_TOLERANCE_M;
-    for (let i = 0; i < el.geometry.length - 1; i += 1) {
-      walkLines.push(makeWalkLine(
-        { lat: el.geometry[i].lat, lng: el.geometry[i].lon },
-        { lat: el.geometry[i + 1].lat, lng: el.geometry[i + 1].lon },
-        maxDistM,
-        highway,
-      ));
-    }
-  }
-
-  return {
-    walkLines: bridgeRoadGaps(walkLines),
-    subwayLines,
-    stationPolygons,
-    walkPolygons: [...stationPolygons, ...apartmentPolygons],
-    apartmentPolygons,
-    blockPolygons: [],
-    buildingCoverage: [],
-  };
-}
-
-function lineKey(line) {
-  return [
-    line.p1.lat.toFixed(6),
-    line.p1.lng.toFixed(6),
-    line.p2.lat.toFixed(6),
-    line.p2.lng.toFixed(6),
-    Math.round(line.maxDistM),
-    line.highway ?? "",
-  ].join("|");
-}
-
-function mergeWalkLines(primary, supplement) {
-  const seen = new Set(primary.map(lineKey));
-  const out = [...primary];
-  for (const line of supplement) {
-    const key = lineKey(line);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(line);
-  }
-  return out;
-}
-
-function mergePolygons(primary, supplement) {
-  const seen = new Set(primary.map((poly) => `${poly[0]?.lat.toFixed(6)}|${poly[0]?.lng.toFixed(6)}|${poly.length}`));
-  const out = [...primary];
-  for (const poly of supplement) {
-    if (poly.length < 3) continue;
-    const key = `${poly[0].lat.toFixed(6)}|${poly[0].lng.toFixed(6)}|${poly.length}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(poly);
-  }
-  return out;
-}
-
-
 async function buildEntry(bbox) {
-  console.log(`[map-cache] ${bbox.name} roads… (VWorld+OSM)`);
+  console.log(`[map-cache] ${bbox.name} roads… (VWorld)`);
   const t0 = Date.now();
-  const [vworldRoadFeatures, osmJson] = await Promise.all([
+  const [vworldRoadFeatures, buildingFeatures] = await Promise.all([
     fetchVworldFeatures(VWORLD_ROAD_LAYER, bbox, MAX_ROAD_PAGES).catch((err) => {
       console.warn(`[map-cache] VWorld roads failed (${bbox.name}):`, err.message);
       return [];
     }),
-    fetchOverpass(buildRoadsQuery(bbox)).catch((err) => {
-      console.warn(`[map-cache] OSM roads failed (${bbox.name}):`, err.message);
-      return { elements: [] };
+    fetchVworldFeatures(VWORLD_BUILDING_LAYER, bbox, MAX_BUILDING_PAGES).catch((err) => {
+      console.warn(`[map-cache] VWorld buildings failed (${bbox.name}):`, err.message);
+      return [];
     }),
   ]);
   console.log(
-    `[map-cache] ${bbox.name} roads raw: vworld=${vworldRoadFeatures.length.toLocaleString()} osm=${(osmJson.elements ?? []).length.toLocaleString()} (${Date.now() - t0}ms)`,
+    `[map-cache] ${bbox.name} raw: roads=${vworldRoadFeatures.length.toLocaleString()} buildings=${buildingFeatures.length.toLocaleString()} (${Date.now() - t0}ms)`,
   );
 
   const vworldLines = featuresToWalkLines(vworldRoadFeatures, estimateVworldRoadHalfWidthM);
-  const osmRoads = parseOverpassRoads(osmJson.elements ?? []);
+  const stationPolygons = featuresToStationPolygons(buildingFeatures);
+  const blockPolygons = featuresToBlockPolygons(buildingFeatures);
   const roads = {
-    walkLines: bridgeRoadGaps(mergeWalkLines(vworldLines, osmRoads.walkLines)),
-    subwayLines: osmRoads.subwayLines,
-    stationPolygons: osmRoads.stationPolygons,
-    walkPolygons: mergePolygons(osmRoads.stationPolygons, osmRoads.apartmentPolygons),
-    apartmentPolygons: osmRoads.apartmentPolygons,
+    walkLines: bridgeRoadGaps(vworldLines),
+    subwayLines: [],
+    stationPolygons,
+    walkPolygons: stationPolygons,
+    apartmentPolygons: [],
     blockPolygons: [],
     buildingCoverage: [bbox],
   };
 
-  console.log(`[map-cache] ${bbox.name} buildings… (VWorld)`);
-  const t1 = Date.now();
-  const buildingFeatures = await fetchVworldFeatures(
-    VWORLD_BUILDING_LAYER,
-    bbox,
-    MAX_BUILDING_PAGES,
-  ).catch((err) => {
-    console.warn(`[map-cache] VWorld buildings failed (${bbox.name}):`, err.message);
-    return [];
-  });
-  const blockPolygons = featuresToBlockPolygons(buildingFeatures);
   console.log(
-    `[map-cache] ${bbox.name} buildings raw: ${buildingFeatures.length.toLocaleString()} → polys=${blockPolygons.length.toLocaleString()} (${Date.now() - t1}ms)`,
+    `[map-cache] ${bbox.name} done: roads=${roads.walkLines.length.toLocaleString()} stations=${stationPolygons.length.toLocaleString()} buildings=${blockPolygons.length.toLocaleString()}`,
   );
 
   return {

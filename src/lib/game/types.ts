@@ -21,7 +21,7 @@ export interface WalkLine {
   maxLng: number;
   /** 이 도로 세그먼트에서 허용되는 중심선 거리(미터) */
   maxDistM: number;
-  /** OSM highway 태그 (대로·골목 구분용) */
+  /** VWorld 도로명 (대로·골목 구분용) */
   highway?: string;
   /** 교차로 갭 메우기용 보조 세그먼트 — 건물 충돌 판정에는 사용 안 함 */
   isBridge?: boolean;
@@ -42,7 +42,7 @@ export interface GeocodeResult {
   roadAddress?: string;
   /** 지번 주소 (예: 서울특별시 동대문구 이문동 360-5) */
   jibunAddress?: string;
-  /** 원본 표시 문자열 (Nominatim fallback) */
+  /** 원본 표시 문자열 */
   displayName?: string;
 }
 

@@ -177,6 +177,10 @@ export function Game() {
   const [previewRecommendation, setPreviewRecommendation] = useState("");
 
   const endRef = useRef<LatLng | null>(null);
+  const lastRouteRef = useRef<{ start: GeocodeResult; end: GeocodeResult } | null>(
+    null,
+  );
+  const [canRestartSameRoute, setCanRestartSameRoute] = useState(false);
   const [destination, setDestination] = useState<LatLng | null>(null);
   const startMarkersRef = useRef<L.Layer[]>([]);
   const sirenOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -365,6 +369,9 @@ export function Game() {
         setToast("지도를 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
         return;
       }
+
+      lastRouteRef.current = { start, end };
+      setCanRestartSameRoute(true);
 
       const startLatLng: LatLng = { lat: start.lat, lng: start.lng };
       const endLatLng: LatLng = { lat: end.lat, lng: end.lng };
@@ -682,16 +689,63 @@ export function Game() {
     };
   }, []);
 
-  const handleRestart = () => {
+  const resetPreviewState = useCallback(() => {
+    setPreviewPhase("init");
+    setPreviewStart(null);
+    setPreviewEnd(null);
+    setPreviewRoute([]);
+    setRoadsSnapped(false);
+    setPreviewFacilities([]);
+    setPreviewCounts(EMPTY_FACILITY_COUNTS);
+    setPreviewDistanceM(0);
+    setPreviewRecommendation("");
+    setLoading(false);
+    setLoadingLabel("귀가 시작");
+  }, []);
+
+  const handleRestartFresh = useCallback(() => {
+    if (loopRef.current !== null) {
+      cancelAnimationFrame(loopRef.current);
+      loopRef.current = null;
+    }
     cleanupEntities();
+    resetPreviewState();
     setGameState("SETUP");
     setShowHud(false);
+    setShowJoystick(false);
+    setSirenActive(false);
     setHp(PLAYER_MAX_HP);
     setDistToHome(null);
+    setZombieCount(0);
+    setStoreGauge(0);
+    lastStoreGaugeRef.current = 0;
     endRef.current = null;
     setDestination(null);
-    window.location.reload();
-  };
+    lastRouteRef.current = null;
+    setCanRestartSameRoute(false);
+  }, [cleanupEntities, resetPreviewState]);
+
+  const handleRestartSameRoute = useCallback(() => {
+    const route = lastRouteRef.current;
+    if (!route) {
+      handleRestartFresh();
+      return;
+    }
+    if (loopRef.current !== null) {
+      cancelAnimationFrame(loopRef.current);
+      loopRef.current = null;
+    }
+    setGameState("BRIEFING");
+    setShowHud(false);
+    setShowJoystick(false);
+    setSirenActive(false);
+    setHp(PLAYER_MAX_HP);
+    setDistToHome(null);
+    setZombieCount(0);
+    setStoreGauge(0);
+    lastStoreGaugeRef.current = 0;
+    void setupGame(route.start, route.end);
+  }, [handleRestartFresh, setupGame]);
 
   return (
     <div className="game-root">
@@ -754,7 +808,9 @@ export function Game() {
       />
       <EndScreens
         gameState={gameState === "GAMEOVER" || gameState === "VICTORY" ? gameState : null}
-        onRestart={handleRestart}
+        canRestartSameRoute={canRestartSameRoute}
+        onRestartSameRoute={handleRestartSameRoute}
+        onRestartFresh={handleRestartFresh}
       />
     </div>
   );

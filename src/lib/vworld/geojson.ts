@@ -145,6 +145,18 @@ export function featuresToWalkLines(
   return lines;
 }
 
+export function featuresToStationPolygons(features: GeoJsonFeature[]): LatLng[][] {
+  const polygons: LatLng[][] = [];
+
+  for (const feature of features) {
+    if (!isStationVworldBuilding(feature.properties)) continue;
+    if (!feature.geometry) continue;
+    polygons.push(...geometryToBlockPolygons(feature.geometry));
+  }
+
+  return polygons;
+}
+
 export function featuresToBlockPolygons(features: GeoJsonFeature[]): LatLng[][] {
   const polygons: LatLng[][] = [];
 

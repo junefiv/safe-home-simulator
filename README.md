@@ -1,6 +1,6 @@
 # 안심 귀가 시뮬레이터
 
-실제 OpenStreetMap 지도와 도로(Overpass) 데이터, 공공데이터포털 시설물 API를 활용한 귀가 생존 게임입니다.
+실제 VWorld 지도·도로·건물 데이터와 공공데이터포털 시설물 API를 활용한 귀가 생존 게임입니다.
 
 ## 로컬 실행
 
@@ -53,10 +53,10 @@ npm run dev
 
 ## API Routes
 
-- `GET /api/geocode?q=` — VWorld 검색 → Kakao → Nominatim
-- `GET /api/map-tiles/{z}/{x}/{y}.png` — VWorld Hybrid 배경지도 (실패 시 OSM)
-- `GET /api/roads?south&west&north&east` — Overpass 도로/역 데이터
-- `GET /api/buildings?south&west&north&east` — VWorld 건축물(LT_C_BLDGINFO) → Overpass 폴백
+- `GET /api/geocode?q=` — VWorld 검색 → Kakao
+- `GET /api/map-tiles/{z}/{x}/{y}.png` — VWorld 배경지도
+- `GET /api/roads?south&west&north&east` — VWorld 도로중심선 + 역사 구역
+- `GET /api/buildings?south&west&north&east` — VWorld 건축물(LT_C_BLDGINFO)
 - `GET /api/facilities?south&west&north&east` — 시설물 통합 (adapter + bbox 필터 + 캐시)
 
 adapter 필드 매핑은 `src/lib/public-data/adapters/`에서 API 응답 형식에 맞게 수정할 수 있습니다.

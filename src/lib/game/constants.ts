@@ -36,48 +36,19 @@ export const WIN_DISTANCE_M = 20;
 export const ROAD_SEGMENT_TOLERANCE_M = 14;
 /** 건물 폴리곤을 안쪽으로 줄여 캐릭터가 좁은 도로를 지나갈 여유(미터) */
 export const BUILDING_COLLISION_INSET_M = 0.2;
-/** OSM way 끝점이 살짝 떨어져 있을 때 연결(미터) — 건물 밖 도로만 */
+/** 도로 끝점이 살짝 떨어져 있을 때 연결(미터) */
 export const ROAD_BRIDGE_MAX_M = 18;
-/** 교차로·코너 여유(미터) — 건물 밖 도로만 */
+/** 교차로·코너 여유(미터) */
 export const ROAD_JUNCTION_SLACK_M = 8;
 /** 건물 데이터가 도로 위로 겹칠 때 추가 허용(미터) */
 export const ROAD_BUILDING_OVERLAP_SLACK_M = 5;
 /** 건물 안 도로 판정 시 끝점 여유(미터) */
 export const ROAD_STRICT_ENDPOINT_SLACK_M = 2;
 
-/** 이동 가능 OSM highway 타입 (미등록 타입도 highway= 이면 허용) */
-export const WALKABLE_HIGHWAY_TYPES = new Set([
-  // 차량 도로
-  "motorway",
-  "motorway_link",
-  "trunk",
-  "trunk_link",
-  "primary",
-  "primary_link",
-  "secondary",
-  "secondary_link",
-  "tertiary",
-  "tertiary_link",
-  "unclassified",
-  "residential",
-  "living_street",
-  "service",
-  "road",
-  "track",
-  "busway",
-  "bus_guideway",
-  // 보행·자전거
-  "footway",
-  "path",
-  "pedestrian",
-  "steps",
-  "cycleway",
-  "bridleway",
-]);
 export const ROADS_BOUNDS_PADDING = 0.25;
-/** 게임 중 고정 지도 줌 (Google roadmap 건물 윤곽은 17+에서 표시) */
+/** 게임 중 고정 지도 줌 */
 export const GAME_MAP_ZOOM = 20;
-/** VWorld/OSM 타일 최대 줌 — 초과 시 동일 타일이 2×2 격자로 반복됨 */
+/** VWorld 타일 최대 줌 — 초과 시 동일 타일이 2×2 격자로 반복됨 */
 export const VWORLD_MAP_ZOOM = 19;
 /** 건물 1회 요청 시 화면 셀 대비 bbox 확장 (1.0 = 3×3 영역) */
 export const BUILDING_LOOKAHEAD_RATIO = 1.0;
